@@ -1,0 +1,107 @@
+{
+  "100": {
+    "brute_force": {
+      "p50_ms": 0.2324000001863169,
+      "p95_ms": 0.3008449999470031,
+      "mean_candidates": 4950.0,
+      "mean_edges": 38.26
+    },
+    "spatial_index": {
+      "p50_ms": 3.535700000156794,
+      "p95_ms": 7.720930000050429,
+      "mean_candidates": 817.0,
+      "mean_edges": 38.26
+    },
+    "edges_match": true
+  },
+  "200": {
+    "brute_force": {
+      "p50_ms": 3.1945000000632717,
+      "p95_ms": 8.603715000117518,
+      "mean_candidates": 19900.0,
+      "mean_edges": 110.36
+    },
+    "spatial_index": {
+      "p50_ms": 1.3910000002397283,
+      "p95_ms": 1.7138650000106281,
+      "mean_candidates": 1945.5,
+      "mean_edges": 110.36
+    },
+    "edges_match": true
+  },
+  "300": {
+    "brute_force": {
+      "p50_ms": 1.863450000200828,
+      "p95_ms": 2.4752900000748923,
+      "mean_candidates": 44850.0,
+      "mean_edges": 186.46
+    },
+    "spatial_index": {
+      "p50_ms": 1.1250000002291927,
+      "p95_ms": 1.33142500071699,
+      "mean_candidates": 3013.58,
+      "mean_edges": 186.46
+    },
+    "edges_match": true
+  },
+  "400": {
+    "brute_force": {
+      "p50_ms": 3.352049999648443,
+      "p95_ms": 3.870804999769461,
+      "mean_candidates": 79800.0,
+      "mean_edges": 227.28
+    },
+    "spatial_index": {
+      "p50_ms": 1.4255000000957807,
+      "p95_ms": 1.8102900000030782,
+      "mean_candidates": 3654.14,
+      "mean_edges": 227.28
+    },
+    "edges_match": true
+  },
+  "500": {
+    "brute_force": {
+      "p50_ms": 7.129700000405137,
+      "p95_ms": 7.999665000170351,
+      "mean_candidates": 124750.0,
+      "mean_edges": 268.5
+    },
+    "spatial_index": {
+      "p50_ms": 1.728999999613734,
+      "p95_ms": 3.367285000012997,
+      "mean_candidates": 4116.04,
+      "mean_edges": 268.5
+    },
+    "edges_match": true
+  },
+  "1000": {
+    "brute_force": {
+      "p50_ms": 32.35709999989922,
+      "p95_ms": 34.0921449997495,
+      "mean_candidates": 499500.0,
+      "mean_edges": 829.6
+    },
+    "spatial_index": {
+      "p50_ms": 4.047049999826413,
+      "p95_ms": 4.306780000069921,
+      "mean_candidates": 12425.82,
+      "mean_edges": 829.6
+    },
+    "edges_match": true
+  },
+  "2000": {
+    "brute_force": {
+      "p50_ms": 131.63675000032526,
+      "p95_ms": 141.1645249997946,
+      "mean_candidates": 1999000.0,
+      "mean_edges": 3263.24
+    },
+    "spatial_index": {
+      "p50_ms": 12.880649999715388,
+      "p95_ms": 13.907095000058689,
+      "mean_candidates": 48839.02,
+      "mean_edges": 3263.24
+    },
+    "edges_match": true
+  }
+}
