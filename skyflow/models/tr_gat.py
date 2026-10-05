@@ -117,6 +117,7 @@ class TRGATLayer(nn.Module):
         out_dim = self.head_dim * self.num_heads
 
         relation_outputs = []
+        self.last_attention: Dict[int, torch.Tensor] = {}   # {r: (E_r, heads)} pre-dropout
         for r in range(self.num_relations):
             if r not in edge_indices or edge_indices[r].size(1) == 0:
                 relation_outputs.append(torch.zeros(N, out_dim, device=device))
@@ -139,6 +140,7 @@ class TRGATLayer(nn.Module):
             attn_logits = F.leaky_relu(attn_logits, negative_slope=0.2)
 
             attn_scores = _scatter_softmax(attn_logits, dst, N)
+            self.last_attention[r] = attn_scores.detach()
             attn_scores = self.dropout(attn_scores)
 
             messages = attn_scores.unsqueeze(-1) * v

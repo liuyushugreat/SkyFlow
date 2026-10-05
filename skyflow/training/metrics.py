@@ -30,6 +30,9 @@ class MetricResult:
     stage_p95_ms: Dict[str, float] = field(default_factory=dict)
     # per-regime (hard/easy by time-to-conflict) and per-cause detection rates
     per_regime: Dict[str, Dict[str, float]] = field(default_factory=dict)
+    # per-snapshot [tp, fp, fn] (fn includes missed positives), in evaluation
+    # order; enables bootstrap over test scenarios without re-running models
+    per_snapshot: List[List[int]] = field(default_factory=list)
 
     def to_dict(self) -> Dict:
         from dataclasses import asdict
@@ -60,6 +63,7 @@ class ConflictMetrics:
         self.missed_ttc: List[np.ndarray] = []
         self.missed_cause: List[np.ndarray] = []
         self.stages: Dict[str, List[float]] = {s: [] for s in STAGES}
+        self.per_snapshot: List[List[int]] = []
 
     def reset(self):
         self.__init__(self.threshold, self.ttc_boundary)
@@ -77,8 +81,12 @@ class ConflictMetrics:
         missed_cause: Optional[torch.Tensor] = None,
     ):
         p = preds.detach().cpu().numpy()
+        lab = labels.detach().cpu().numpy()
         self.all_preds.append(p)
-        self.all_labels.append(labels.detach().cpu().numpy())
+        self.all_labels.append(lab)
+        pp, ap = p >= self.threshold, lab >= 0.5
+        self.per_snapshot.append([int(np.sum(pp & ap)), int(np.sum(pp & ~ap)),
+                                  int(np.sum(~pp & ap)) + max(int(n_missed), 0)])
         self.all_ttc.append(ttc.detach().cpu().numpy() if ttc is not None else np.full(len(p), -1.0, np.float32))
         self.all_cause.append(cause.detach().cpu().numpy().astype(np.int16) if cause is not None else np.full(len(p), -1, np.int16))
         if latency_ms is not None:
@@ -86,13 +94,16 @@ class ConflictMetrics:
         if stage_ms:
             for k, v in stage_ms.items():
                 self.stages.setdefault(k, []).append(float(v))
-        self.add_missed(n_missed, missed_ttc, missed_cause)
+        self.add_missed(n_missed, missed_ttc, missed_cause, _standalone=False)
 
     def add_missed(self, n_missed: int, missed_ttc: Optional[torch.Tensor] = None,
-                   missed_cause: Optional[torch.Tensor] = None):
-        """Record positives of a snapshot that were not scored."""
-        n_missed = int(n_missed)
-        if n_missed <= 0:
+                   missed_cause: Optional[torch.Tensor] = None, _standalone: bool = True):
+        """Record positives of a snapshot that was not scored at all (no
+        candidate pairs); ``update`` handles the scored case itself."""
+        n_missed = max(int(n_missed), 0)
+        if _standalone:
+            self.per_snapshot.append([0, 0, n_missed])   # keep one entry per snapshot
+        if n_missed == 0:
             return
         self.n_missed += n_missed
         self.missed_ttc.append(missed_ttc.detach().cpu().numpy() if missed_ttc is not None
@@ -170,6 +181,7 @@ class ConflictMetrics:
             stage_ms=stage_ms,
             stage_p95_ms=stage_p95,
             per_regime=self._per_regime(preds, labels, ttc, cause),
+            per_snapshot=list(self.per_snapshot),
         )
 
 
