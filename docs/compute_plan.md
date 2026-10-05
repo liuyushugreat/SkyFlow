@@ -57,7 +57,7 @@ Findings:
 | abl_no_gating | 1.132 M | 92.0 | 8.3 GB | |
 | abl_no_gru | 1.116 M | 118.6 | 8.4 GB | |
 | abl_bce | 1.145 M | 118.6 | 8.4 GB | |
-| abl_telemetry_only | 1.145 M | _pending (dry run still building its cache)_ | | **assumption until measured: ≤ TR-GAT** |
+| abl_telemetry_only | 1.145 M | 32.5 | 8.4 GB | UAV nodes + approaches edges only; its own cache took 28 min |
 | CPA-Rule | 0 | — | 0.8 GB | eval only, 3.2 min incl. val threshold search |
 | VO | 0 | — | 0.8 GB | eval only, 5.8 min (python loop, P95 645 ms) |
 
@@ -87,35 +87,35 @@ Per-run worst case = s/epoch × 150:
 | abl_no_gating | 3.83 | 3 | 11.5 |
 | abl_no_gru | 4.94 | 3 | 14.8 |
 | abl_bce | 4.94 | 3 | 14.8 |
-| abl_telemetry_only | ≤ 5.13 (assumption) | 3 | ≤ 15.4 |
-| **ablation total (3 seeds)** | | | **≤ 56.5** |
-| ablation total (1 seed) | | | ≤ 18.8 |
+| abl_telemetry_only | 1.35 | 3 | 4.1 |
+| **ablation total (3 seeds)** | | | **45.2** |
+| ablation total (1 seed) | | | 15.1 |
 
 Wall-clock at concurrency 2 (process-hours / 2, both slots busy):
 
 | block | worst case (150 ep) | if runs stop at ~60 epochs |
 |---|---|---|
 | main (6 methods × 3 seeds + rules) | 23.3 h | 9.4 h |
-| ablations, 3 seeds | 28.3 h | 11.3 h |
-| ablations, 1 seed | 9.4 h | 3.8 h |
+| ablations, 3 seeds | 22.6 h | 9.0 h |
+| ablations, 1 seed | 7.5 h | 3.0 h |
 | S15 evaluation (eval_only 1000 epochs × 22 ckpts, robustness 9 conditions incl. 9 test-cache builds ≈ 6 min each, scaling N≤2000, attention) | ≈ 3 h (assumption; cache builds dominate) | ≈ 3 h |
-| **total, 3 ablation seeds** | **≈ 55 h** | ≈ 24 h |
+| **total, 3 ablation seeds** | **≈ 49 h** | ≈ 21 h |
 
-**GPU-hours: ≈ 103 process-hours ≈ 52 h of one RTX 4090 at concurrency 2 (worst case).**
+**GPU-hours: ≈ 92 process-hours ≈ 46 h of one RTX 4090 at concurrency 2 (worst case).**
 
 ## 4. Schedule on the local card only
 
-Start as soon as the dry run finishes (2026-10-05 ≈ 20:30):
+Start 2026-10-05 ≈ 20:30 (dry run finished 19:36):
 
-- main finished by **2026-10-06 ≈ 20:00** (worst case), ablations (3 seeds) by **2026-10-08 ≈ 00:30**,
-  S15 evaluation by **2026-10-08 ≈ 04:00**.
-- Deadline for the rent/no-rent rule: all training done before **2026-10-10 20:00** → **≈ 64 h of slack**
+- main finished by **2026-10-06 ≈ 20:00** (worst case), ablations (3 seeds) by **2026-10-07 ≈ 18:30**,
+  S15 evaluation by **2026-10-07 ≈ 21:30**.
+- Deadline for the rent/no-rent rule: all training done before **2026-10-10 20:00** → **≈ 73 h of slack**
   even in the worst case; enough to absorb one full restart of the main block.
 
 Decision rule (from the plan): local card finishes before 10-10 20:00 → **do not rent**.
 
-Cloud cost formula kept for reference: `cost = GPU-hours × hourly price`. With ≈ 52 GPU-h on a
-4090-class card the price field is left blank: `52 h × ____ ¥/h = ____ ¥`. Not needed under the decision.
+Cloud cost formula kept for reference: `cost = GPU-hours × hourly price`. With ≈ 46 GPU-h on a
+4090-class card the price field is left blank: `46 h × ____ ¥/h = ____ ¥`. Not needed under the decision.
 
 ## 5. Recommendations
 
@@ -126,7 +126,7 @@ Cloud cost formula kept for reference: `cost = GPU-hours × hourly price`. With 
   are written with retry (`save_with_retry`) but `results/main` itself is inside the synced folder.
 - Do not start anything else on the GPU while the two slots are busy (a third CUDA process re-creates
   the WDDM paging collapse measured above).
-- `abl_telemetry_only` must build its own cache first (~1 h CPU); it is already being built by the dry run.
+- `abl_telemetry_only`'s own cache (28 min CPU) was already built by the dry run and is reused.
 
 ## 6. Commands
 
@@ -142,4 +142,4 @@ python scripts/run_main.py --config configs/default.yaml --results_dir results/m
 
 ## Conclusion
 
-**Do not rent: the local 4090 (2 concurrent tasks) finishes the main experiment and 3-seed ablations by about 10-08 even if every run goes to 150 epochs.**
+**Do not rent: the local 4090 (2 concurrent tasks) finishes the main experiment and 3-seed ablations by about 10-07 evening even if every run goes to 150 epochs.**
