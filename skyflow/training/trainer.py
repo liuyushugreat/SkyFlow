@@ -23,10 +23,16 @@ from skyflow.models.conflict_head import (
     build_pair_edge_features,
 )
 from skyflow.data.tkg_builder import TKGSnapshot
-from skyflow.training.losses import FocalLoss
-from skyflow.training.metrics import ConflictMetrics, LatencyTimer
+from skyflow.training.losses import FocalLoss, build_loss
+from skyflow.training.metrics import ConflictMetrics, LatencyTimer, MetricResult
 
 logger = logging.getLogger(__name__)
+
+_OOM_ERRORS = (torch.cuda.OutOfMemoryError,) if hasattr(torch.cuda, "OutOfMemoryError") else (RuntimeError,)
+
+
+def _is_oom(err: BaseException) -> bool:
+    return isinstance(err, _OOM_ERRORS) or "out of memory" in str(err).lower()
 
 
 def _build_warmup_cosine_scheduler(optimizer, warmup_steps: int, total_steps: int):
@@ -56,6 +62,15 @@ class SkyFlowTrainer:
 
         self.model: Optional[TRGAT] = None
         self.head: Optional[ConflictScoringHead] = None
+        # S7a bookkeeping
+        tc = cfg.training
+        self.micro_batch = max(int(getattr(tc, "batch_windows", 1)), 1)
+        self.oom_adjustments: List[Dict] = []
+        self.history: List[Dict] = []
+        if self.device.type == "cuda":
+            tf32 = bool(getattr(tc, "tf32", True))
+            torch.backends.cuda.matmul.allow_tf32 = tf32
+            torch.backends.cudnn.allow_tf32 = tf32
 
     def build_model(self) -> Tuple[TRGAT, ConflictScoringHead]:
         mc = self.cfg.model
@@ -68,6 +83,9 @@ class SkyFlowTrainer:
             temporal_dim=mc.temporal_dim,
             recurrent_dim=mc.recurrent_dim,
             dropout=mc.dropout,
+            use_temporal=getattr(mc, "use_temporal", True),
+            use_gating=getattr(mc, "use_gating", True),
+            use_gru=getattr(mc, "use_gru", True),
         ).to(self.device)
 
         self.head = ConflictScoringHead(
@@ -103,8 +121,13 @@ class SkyFlowTrainer:
         train_data: List[Tuple[TKGSnapshot, torch.Tensor]],
         val_data: List[Tuple[TKGSnapshot, torch.Tensor]],
         seed: int = 42,
+        output_dir: Optional[Path] = None,
+        max_epochs: Optional[int] = None,
     ) -> Dict:
-        """Train for one seed, return best metrics."""
+        """Train for one seed with early stopping on validation F1.
+
+        Returns a dict with the best validation metrics plus training
+        bookkeeping (epochs run, best epoch, wall time, OOM adjustments)."""
         torch.manual_seed(seed)
         np.random.seed(seed)
 
@@ -113,19 +136,34 @@ class SkyFlowTrainer:
 
         tc = self.cfg.training
         K = self.cfg.data.observation_window
+        n_epochs = max_epochs if max_epochs is not None else tc.epochs
+        batch_windows = max(int(getattr(tc, "batch_windows", 1)), 1)
+        self.micro_batch = min(self.micro_batch, batch_windows)
+        patience = int(getattr(tc, "early_stopping_patience", 0))
+        min_epochs = int(getattr(tc, "min_epochs", 1))
+        eval_every = max(int(getattr(tc, "eval_every", 1)), 1)
+        use_amp = bool(getattr(tc, "amp", False)) and self.device.type == "cuda"
+
         params = list(self.model.parameters()) + list(self.head.parameters())
         optimizer = AdamW(params, lr=tc.learning_rate, weight_decay=tc.weight_decay)
 
-        total_steps = tc.epochs * max(len(train_data) // K, 1)
+        n_windows = len(self._group_into_windows(train_data, K))
+        steps_per_epoch = max(int(np.ceil(n_windows / batch_windows)), 1)
+        total_steps = n_epochs * steps_per_epoch
         scheduler = _build_warmup_cosine_scheduler(
-            optimizer, warmup_steps=tc.warmup_steps, total_steps=total_steps
+            optimizer, warmup_steps=min(tc.warmup_steps, max(total_steps // 10, 1)), total_steps=total_steps
         )
-        criterion = FocalLoss(gamma=tc.focal_gamma)
+        criterion = build_loss(getattr(tc, "loss", "focal"), tc.focal_gamma,
+                               getattr(tc, "focal_alpha", 0.75))
 
         best_f1 = -1.0
-        best_metrics = {}
-        output_dir = Path(self.cfg.output_dir)
+        best_metrics: Dict = {}
+        best_epoch = 0
+        output_dir = Path(output_dir) if output_dir is not None else Path(self.cfg.output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
+        ckpt_path = output_dir / "best_model.pt"
+        self.history = []
+        self.oom_adjustments = []
 
         def _save_checkpoint(metrics_dict, epoch):
             torch.save({
@@ -134,100 +172,151 @@ class SkyFlowTrainer:
                 "epoch": epoch,
                 "metrics": metrics_dict,
                 "config": self.cfg,
-            }, output_dir / "best_model.pt")
+            }, ckpt_path)
 
+        def _window_loss(window) -> Tuple[torch.Tensor, int]:
+            rec_state = None
+            loss = 0.0
+            valid = 0
+            for snapshot, labels in window:
+                snapshot = self._to_device(snapshot)
+                labels = labels.to(self.device)
+                with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=use_amp):
+                    node_emb, rec_state = self.model(
+                        snapshot.node_features, snapshot.edge_indices, snapshot.edge_deltas,
+                        recurrent_state=rec_state,
+                    )
+                pairs = snapshot.conflict_pairs
+                if pairs is None or pairs.size(1) == 0:
+                    rec_state = rec_state.detach()
+                    continue
+                with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=use_amp):
+                    preds = self._score_pairs(snapshot, node_emb, rec_state, pairs)
+                loss = loss + criterion(preds.float(), labels)
+                valid += 1
+                rec_state = rec_state.detach()
+            return loss, valid
+
+        t_start = time.perf_counter()
+        epochs_run = 0
+        stale = 0
         global_step = 0
-        for epoch in range(tc.epochs):
+        for epoch in range(n_epochs):
             self.model.train()
             self.head.train()
             epoch_loss = 0.0
-            n_batches = 0
+            n_steps = 0
+            t_epoch = time.perf_counter()
 
-            np.random.shuffle(train_data)
             windows = self._group_into_windows(train_data, K)
             np.random.shuffle(windows)
 
-            for window in windows:
-                optimizer.zero_grad()
-                window_loss = 0.0
-                valid_steps = 0
-                rec_state = None
+            for g in range(0, len(windows), batch_windows):
+                group = windows[g:g + batch_windows]
+                while True:
+                    try:
+                        optimizer.zero_grad(set_to_none=True)
+                        group_loss = 0.0
+                        n_valid_windows = 0
+                        for m in range(0, len(group), self.micro_batch):
+                            micro = group[m:m + self.micro_batch]
+                            micro_loss = 0.0
+                            micro_valid = 0
+                            for window in micro:
+                                wl, valid = _window_loss(window)
+                                if valid > 0:
+                                    micro_loss = micro_loss + wl / valid
+                                    micro_valid += 1
+                            if micro_valid > 0:
+                                (micro_loss / len(group)).backward()      # accumulate -> same effective batch
+                                group_loss += float(micro_loss.detach()) 
+                                n_valid_windows += micro_valid
+                        if n_valid_windows > 0:
+                            nn.utils.clip_grad_norm_(params, tc.gradient_clip_norm)
+                            optimizer.step()
+                            epoch_loss += group_loss / n_valid_windows
+                            n_steps += 1
+                        scheduler.step()
+                        global_step += 1
+                        break
+                    except Exception as err:            # noqa: BLE001
+                        if not _is_oom(err) or self.micro_batch == 1:
+                            raise
+                        new_mb = max(self.micro_batch // 2, 1)
+                        self.oom_adjustments.append({
+                            "epoch": epoch + 1, "step": global_step,
+                            "micro_batch_from": self.micro_batch, "micro_batch_to": new_mb,
+                            "effective_batch_windows": batch_windows,
+                        })
+                        logger.warning(f"OOM: micro-batch {self.micro_batch} -> {new_mb} "
+                                       f"(effective batch kept at {batch_windows} windows)")
+                        self.micro_batch = new_mb
+                        optimizer.zero_grad(set_to_none=True)
+                        if self.device.type == "cuda":
+                            torch.cuda.empty_cache()
 
-                for snapshot, labels in window:
-                    snapshot = self._to_device(snapshot)
-                    labels = labels.to(self.device)
+            epochs_run = epoch + 1
+            avg_loss = epoch_loss / max(n_steps, 1)
+            record = {"epoch": epochs_run, "train_loss": avg_loss,
+                      "epoch_seconds": time.perf_counter() - t_epoch,
+                      "lr": optimizer.param_groups[0]["lr"], "micro_batch": self.micro_batch}
 
-                    node_emb, rec_state = self.model(
-                        snapshot.node_features,
-                        snapshot.edge_indices,
-                        snapshot.edge_deltas,
-                        recurrent_state=rec_state,
-                    )
-
-                    pairs = snapshot.conflict_pairs
-                    if pairs is None or pairs.size(1) == 0:
-                        rec_state = rec_state.detach()
-                        continue
-
-                    preds = self._score_pairs(snapshot, node_emb, rec_state, pairs)
-                    step_loss = criterion(preds, labels)
-                    window_loss = window_loss + step_loss
-                    valid_steps += 1
-
-                    rec_state = rec_state.detach()
-
-                if valid_steps > 0:
-                    (window_loss / valid_steps).backward()
-                    nn.utils.clip_grad_norm_(params, tc.gradient_clip_norm)
-                    optimizer.step()
-                    scheduler.step()
-                    global_step += 1
-                    epoch_loss += (window_loss / valid_steps).item()
-                    n_batches += 1
-
-            avg_loss = epoch_loss / max(n_batches, 1)
-
-            if (epoch + 1) % 10 == 0 or epoch == 0:
+            if epochs_run % eval_every == 0 or epochs_run == n_epochs:
                 val_metrics = self.evaluate(val_data)
+                record.update({"val_f1": val_metrics.f1, "val_cdr": val_metrics.cdr,
+                               "val_far": val_metrics.far, "val_precision": val_metrics.precision})
                 logger.info(
-                    f"Epoch {epoch+1}/{tc.epochs} | "
-                    f"Loss: {avg_loss:.4f} | "
-                    f"Val CDR: {val_metrics.cdr:.4f} | "
-                    f"Val F1: {val_metrics.f1:.4f} | "
-                    f"Val FAR: {val_metrics.far:.4f}"
+                    f"Epoch {epochs_run}/{n_epochs} | Loss: {avg_loss:.4f} | "
+                    f"Val CDR: {val_metrics.cdr:.4f} | Val F1: {val_metrics.f1:.4f} | "
+                    f"Val FAR: {val_metrics.far:.4f} | {record['epoch_seconds']:.1f}s"
                 )
-
                 if val_metrics.f1 > best_f1:
                     best_f1 = val_metrics.f1
+                    best_epoch = epochs_run
                     best_metrics = {
-                        "cdr": val_metrics.cdr,
-                        "far": val_metrics.far,
-                        "f1": val_metrics.f1,
-                        "precision": val_metrics.precision,
-                        "latency_ms": val_metrics.latency_ms,
-                        "epoch": epoch + 1,
-                        "seed": seed,
+                        "cdr": val_metrics.cdr, "far": val_metrics.far, "f1": val_metrics.f1,
+                        "precision": val_metrics.precision, "latency_ms": val_metrics.latency_ms,
+                        "epoch": epochs_run, "seed": seed, "per_regime": val_metrics.per_regime,
                     }
-                    _save_checkpoint(best_metrics, epoch + 1)
+                    _save_checkpoint(best_metrics, epochs_run)
+                    stale = 0
+                else:
+                    stale += 1
+            self.history.append(record)
 
-        if not (output_dir / "best_model.pt").exists():
+            if patience > 0 and epochs_run >= min_epochs and stale >= patience:
+                logger.info(f"Early stopping at epoch {epochs_run} (best F1 {best_f1:.4f} @ {best_epoch})")
+                break
+
+        if not ckpt_path.exists():
             best_metrics = {"cdr": 0, "far": 1, "f1": 0, "precision": 0,
-                            "latency_ms": 0, "epoch": tc.epochs, "seed": seed}
-            _save_checkpoint(best_metrics, tc.epochs)
+                            "latency_ms": 0, "epoch": epochs_run, "seed": seed, "per_regime": {}}
+            _save_checkpoint(best_metrics, epochs_run)
 
+        best_metrics = dict(best_metrics)
+        best_metrics.update({
+            "epochs_run": epochs_run,
+            "best_epoch": best_epoch,
+            "train_seconds": time.perf_counter() - t_start,
+            "early_stopped": epochs_run < n_epochs,
+            "oom_adjustments": list(self.oom_adjustments),
+            "micro_batch_final": self.micro_batch,
+            "effective_batch_windows": batch_windows,
+            "checkpoint": str(ckpt_path),
+        })
         return best_metrics
 
     @torch.no_grad()
     def evaluate(
         self,
         data: List[Tuple[TKGSnapshot, torch.Tensor]],
-    ) -> "ConflictMetrics":
-        from skyflow.training.metrics import MetricResult
-
+    ) -> MetricResult:
         self.model.eval()
         self.head.eval()
         K = self.cfg.data.observation_window
-        metrics = ConflictMetrics(threshold=self.cfg.training.conflict_threshold)
+        tc = self.cfg.training
+        metrics = ConflictMetrics(threshold=tc.conflict_threshold,
+                                  regime_ttc_boundary_s=getattr(tc, "regime_ttc_boundary_s", 15.0))
 
         windows = self._group_into_windows(data, K)
         for window in windows:
@@ -247,7 +336,7 @@ class SkyFlowTrainer:
 
                 pairs = snapshot.conflict_pairs
                 if pairs is None or pairs.size(1) == 0:
-                    metrics.add_missed(snapshot.num_missed_positives)
+                    metrics.add_missed(snapshot.num_missed_positives, snapshot.missed_ttc, snapshot.missed_cause)
                     continue
 
                 t_score = LatencyTimer()
@@ -264,6 +353,8 @@ class SkyFlowTrainer:
                     latency_ms=t_gnn.elapsed_ms + t_score.elapsed_ms,
                     n_missed=snapshot.num_missed_positives,
                     stage_ms=stage_ms,
+                    ttc=snapshot.conflict_ttc, cause=snapshot.conflict_cause,
+                    missed_ttc=snapshot.missed_ttc, missed_cause=snapshot.missed_cause,
                 )
 
         return metrics.compute()

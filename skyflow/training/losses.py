@@ -48,3 +48,19 @@ class FocalLoss(nn.Module):
         alpha_t = torch.where(target == 1, self.alpha, 1 - self.alpha)
 
         return (alpha_t * focal_weight * bce).mean()
+
+
+class BCELoss(nn.Module):
+    """Plain binary cross-entropy on probabilities (abl_bce)."""
+
+    def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        pred = pred.clamp(1e-7, 1 - 1e-7)
+        return F.binary_cross_entropy(pred, target)
+
+
+def build_loss(name: str, gamma: float = 2.0, alpha: float = 0.75) -> nn.Module:
+    if name == "focal":
+        return FocalLoss(gamma=gamma, alpha=alpha)
+    if name == "bce":
+        return BCELoss()
+    raise ValueError(f"unknown loss {name!r}; expected 'focal' or 'bce'")

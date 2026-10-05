@@ -129,6 +129,7 @@ class TKGSnapshot:
     # positives that are not in conflict_pairs (counted as misses by metrics)
     num_missed_positives: int = 0
     missed_ttc: Optional[torch.Tensor] = None          # (M,) seconds
+    missed_cause: Optional[torch.Tensor] = None        # (M,) int8 cause codes
     # build statistics
     build_time_ms: float = 0.0
     num_pair_candidates: int = 0                       # pairs that went through the CPA test

@@ -1,4 +1,5 @@
 outputs/
+cache/
 *.pt
 *.pth
 __pycache__/
@@ -10,3 +11,4 @@ build/
 
 # local planning doc (contains personal info)
 docs/SKYFLOW_PLAN.md
+results/_smoke/

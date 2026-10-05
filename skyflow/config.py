@@ -18,6 +18,10 @@ class ModelConfig:
     dropout: float = 0.1
     # Derived from features.leakage_free when None (5 leakage-free / 6 legacy).
     num_relation_types: Optional[int] = None
+    # Ablation switches (S7a)
+    use_temporal: bool = True       # False -> TR-GAT-NT: φ(δ) removed from attention
+    use_gating: bool = True         # False -> uniform relation average instead of g_r(h_i)
+    use_gru: bool = True            # False -> per-snapshot projection, no recurrence
 
 
 @dataclass
@@ -36,9 +40,21 @@ class DataConfig:
     conflict_v_sep_m: float = 3.0
     sim_freq_hz: float = 10.0
     grid_size_m: float = 5000.0
+    # Legacy (paper-claimed) volumes; not used by the pipeline.
     scenario_minutes_train: int = 3360
     scenario_minutes_val: int = 720
     scenario_minutes_test: int = 720
+    # Dataset actually generated / cached (S7a)
+    train_scenarios: int = 40
+    val_scenarios: int = 10
+    test_scenarios: int = 10
+    scenario_duration_s: float = 60.0
+    sim_seed: int = 42          # dataset seed: fixed across model seeds (part of the cache key)
+    cache_dir: str = "cache"
+
+    def split_scenarios(self, split: str) -> int:
+        return {"train": self.train_scenarios, "val": self.val_scenarios,
+                "test": self.test_scenarios}[split]
 
 
 @dataclass
@@ -109,18 +125,32 @@ PAPER_SEEDS = [42, 123, 456, 789, 1024]
 
 @dataclass
 class TrainingConfig:
-    epochs: int = 150
-    batch_size: int = 32
+    epochs: int = 150               # max epochs (early stopping may end sooner)
+    batch_size: int = 32            # legacy, unused
     learning_rate: float = 3e-4
     weight_decay: float = 1e-5
     gradient_clip_norm: float = 1.0
     focal_gamma: float = 2.0
+    focal_alpha: float = 0.75
+    loss: str = "focal"             # "focal" | "bce" (abl_bce)
     conflict_threshold: float = 0.42
     warmup_steps: int = 1000
     seed: int = 42
     num_seeds: int = 5
     seeds: List[int] = field(default_factory=lambda: [42, 123, 456, 789, 1024])
     device: str = "auto"
+    # S7a: early stopping on validation F1 (same rule for every method)
+    early_stopping_patience: int = 15
+    min_epochs: int = 5
+    eval_every: int = 1
+    # S7a: observation windows per optimizer step; OOM halves micro-batch and
+    # accumulates gradients to keep this effective batch
+    batch_windows: int = 4
+    # S7a: numerics
+    amp: bool = False
+    tf32: bool = True
+    # regime boundary on time-to-conflict (s): hard <= boundary < easy
+    regime_ttc_boundary_s: float = 15.0
 
 
 _SECTIONS = ("model", "data", "training", "features", "labels", "temporal", "sim", "graph", "scoring", "baselines")

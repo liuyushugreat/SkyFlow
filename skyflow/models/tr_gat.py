@@ -57,12 +57,21 @@ class TRGATLayer(nn.Module):
         num_relations: int = 6,
         temporal_dim: int = 32,
         dropout: float = 0.1,
+        use_temporal: bool = True,
+        use_gating: bool = True,
     ):
         super().__init__()
         self.num_heads = num_heads
         self.num_relations = num_relations
         self.head_dim = out_dim // num_heads
         assert out_dim % num_heads == 0
+        # Ablation switches: use_temporal=False removes φ(δ) from the attention
+        # input entirely (TR-GAT-NT); use_gating=False replaces the learned
+        # softmax gate g_r(h_i) by a uniform average over relations.
+        self.use_temporal = use_temporal
+        self.use_gating = use_gating
+        if not use_temporal:
+            temporal_dim = 0
 
         self.W_Q = nn.ModuleList([
             nn.Linear(in_dim, out_dim, bias=False) for _ in range(num_relations)
@@ -80,7 +89,7 @@ class TRGATLayer(nn.Module):
             for _ in range(num_relations)
         ])
 
-        self.gate_proj = nn.Linear(out_dim * num_relations, num_relations)
+        self.gate_proj = nn.Linear(out_dim * num_relations, num_relations) if use_gating else None
         self.layer_norm = nn.LayerNorm(out_dim)
         self.dropout = nn.Dropout(dropout)
 
@@ -120,10 +129,12 @@ class TRGATLayer(nn.Module):
             k = self.W_K[r](x[src]).view(E_r, self.num_heads, self.head_dim)
             v = self.W_V[r](x[src]).view(E_r, self.num_heads, self.head_dim)
 
-            phi = temporal_enc[r]
-            phi_expanded = phi.unsqueeze(1).expand(-1, self.num_heads, -1)
-
-            attn_input = torch.cat([q, k, phi_expanded], dim=-1)
+            if self.use_temporal:
+                phi = temporal_enc[r]
+                phi_expanded = phi.unsqueeze(1).expand(-1, self.num_heads, -1)
+                attn_input = torch.cat([q, k, phi_expanded], dim=-1)
+            else:
+                attn_input = torch.cat([q, k], dim=-1)
             attn_logits = (attn_input * self.attn_vectors[r].unsqueeze(0)).sum(dim=-1)
             attn_logits = F.leaky_relu(attn_logits, negative_slope=0.2)
 
@@ -137,9 +148,13 @@ class TRGATLayer(nn.Module):
 
             relation_outputs.append(agg.reshape(N, out_dim))
 
-        stacked = torch.cat(relation_outputs, dim=-1)
-        gate_logits = self.gate_proj(stacked)
-        gates = F.softmax(gate_logits, dim=-1)
+        if self.use_gating:
+            stacked = torch.cat(relation_outputs, dim=-1)
+            gate_logits = self.gate_proj(stacked)
+            gates = F.softmax(gate_logits, dim=-1)
+        else:
+            gates = torch.full((N, self.num_relations), 1.0 / self.num_relations, device=device)
+        self.last_gates = gates.detach()
 
         fused = torch.zeros(N, out_dim, device=device)
         for r in range(self.num_relations):
@@ -167,10 +182,16 @@ class TRGAT(nn.Module):
         temporal_dim: int = 32,
         recurrent_dim: int = 64,
         dropout: float = 0.1,
+        use_temporal: bool = True,
+        use_gating: bool = True,
+        use_gru: bool = True,
     ):
         super().__init__()
         self.embed_dim = embed_dim
         self.recurrent_dim = recurrent_dim
+        self.use_temporal = use_temporal
+        self.use_gating = use_gating
+        self.use_gru = use_gru
 
         self.input_proj = nn.Linear(node_feature_dim, embed_dim)
 
@@ -182,11 +203,17 @@ class TRGAT(nn.Module):
                 num_relations=num_relations,
                 temporal_dim=temporal_dim,
                 dropout=dropout,
+                use_temporal=use_temporal,
+                use_gating=use_gating,
             )
             for _ in range(num_layers)
         ])
 
-        self.temporal_gru = nn.GRUCell(embed_dim, recurrent_dim)
+        if use_gru:
+            self.temporal_gru = nn.GRUCell(embed_dim, recurrent_dim)
+        else:
+            # abl_no_gru: per-snapshot projection, no recurrence across epochs
+            self.state_proj = nn.Linear(embed_dim, recurrent_dim)
         self.temporal_encoding = SinusoidalTemporalEncoding(d_phi=temporal_dim)
 
     def forward(
@@ -211,12 +238,14 @@ class TRGAT(nn.Module):
         temporal_enc = {
             r: self.temporal_encoding(edge_deltas[r])
             for r in edge_deltas
-        }
+        } if self.use_temporal else {}
 
         for layer in self.layers:
             x = layer(x, edge_indices, temporal_enc)
 
         N = x.size(0)
+        if not self.use_gru:
+            return x, torch.tanh(self.state_proj(x))
         if recurrent_state is None:
             recurrent_state = torch.zeros(N, self.recurrent_dim, device=x.device)
         new_state = self.temporal_gru(x, recurrent_state)

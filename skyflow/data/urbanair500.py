@@ -1048,6 +1048,7 @@ class UrbanAir500:
         else:
             missed = np.ones(pos_i.size, dtype=bool)
         missed_ttc = ttc_mat[pos_i[missed], pos_j[missed]]
+        missed_cause = cause_mat[pos_i[missed], pos_j[missed]]
 
         snapshot.conflict_pairs = torch.tensor(np.stack([src, dst]), dtype=torch.long, device=device)
         snapshot.conflict_labels = torch.tensor(labels, dtype=torch.float32, device=device)
@@ -1057,6 +1058,7 @@ class UrbanAir500:
         )
         snapshot.num_missed_positives = int(missed.sum())
         snapshot.missed_ttc = torch.tensor(missed_ttc, dtype=torch.float32, device=device)
+        snapshot.missed_cause = torch.tensor(missed_cause, dtype=torch.int8, device=device)
 
     def _sample_pairs_legacy(self, n: int, ttc_mat: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         """Legacy sampling: all positives + random negatives (cap 4N, ≥10× positives)."""

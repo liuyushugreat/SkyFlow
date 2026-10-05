@@ -1,0 +1,29 @@
+# Small configuration for smoke tests (results/_smoke). Same pipeline, tiny scene.
+model:
+  num_layers: 2
+  embed_dim: 64
+  num_heads: 4
+  temporal_dim: 16
+  recurrent_dim: 32
+
+data:
+  num_uavs: 60
+  num_sectors: 4
+  num_weather_cells: 4
+  num_restricted_zones: 2
+  grid_size_m: 1500.0
+  train_scenarios: 2
+  val_scenarios: 1
+  test_scenarios: 1
+  scenario_duration_s: 20.0
+  sim_seed: 42
+  cache_dir: cache/_smoke
+
+training:
+  epochs: 2
+  warmup_steps: 5
+  early_stopping_patience: 3
+  min_epochs: 1
+  batch_windows: 2
+
+output_dir: results/_smoke

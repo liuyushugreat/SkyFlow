@@ -28,33 +28,41 @@ class MetricResult:
     num_missed_positives: int = 0
     stage_ms: Dict[str, float] = field(default_factory=dict)   # mean ms per stage
     stage_p95_ms: Dict[str, float] = field(default_factory=dict)
+    # per-regime (hard/easy by time-to-conflict) and per-cause detection rates
+    per_regime: Dict[str, Dict[str, float]] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict:
+        from dataclasses import asdict
+        return asdict(self)
 
 
 STAGES = ("graph_build", "gnn_forward", "pair_scoring")
+CAUSE_NAMES = ("planned_crossing", "wind_deviation", "nonconforming", "priority_insertion", "noncooperative")
 
 
 class ConflictMetrics:
     """Accumulates predictions across batches and computes final metrics.
 
     Positives that were never scored (because the candidate pre-filter
-    dropped them) are passed via ``n_missed`` and counted as false negatives,
-    so CDR reflects the whole pipeline, not only the scorer."""
+    dropped them) are passed via ``n_missed`` (optionally with their ttc /
+    cause) and counted as false negatives, so CDR reflects the whole
+    pipeline, not only the scorer."""
 
-    def __init__(self, threshold: float = 0.42):
+    def __init__(self, threshold: float = 0.42, regime_ttc_boundary_s: float = 15.0):
         self.threshold = threshold
+        self.ttc_boundary = regime_ttc_boundary_s
         self.all_preds: List[np.ndarray] = []
         self.all_labels: List[np.ndarray] = []
+        self.all_ttc: List[np.ndarray] = []
+        self.all_cause: List[np.ndarray] = []
         self.latencies: List[float] = []
         self.n_missed = 0
+        self.missed_ttc: List[np.ndarray] = []
+        self.missed_cause: List[np.ndarray] = []
         self.stages: Dict[str, List[float]] = {s: [] for s in STAGES}
 
     def reset(self):
-        self.all_preds.clear()
-        self.all_labels.clear()
-        self.latencies.clear()
-        self.n_missed = 0
-        for v in self.stages.values():
-            v.clear()
+        self.__init__(self.threshold, self.ttc_boundary)
 
     def update(
         self,
@@ -63,23 +71,67 @@ class ConflictMetrics:
         latency_ms: Optional[float] = None,
         n_missed: int = 0,
         stage_ms: Optional[Dict[str, float]] = None,
+        ttc: Optional[torch.Tensor] = None,
+        cause: Optional[torch.Tensor] = None,
+        missed_ttc: Optional[torch.Tensor] = None,
+        missed_cause: Optional[torch.Tensor] = None,
     ):
-        self.all_preds.append(preds.detach().cpu().numpy())
+        p = preds.detach().cpu().numpy()
+        self.all_preds.append(p)
         self.all_labels.append(labels.detach().cpu().numpy())
+        self.all_ttc.append(ttc.detach().cpu().numpy() if ttc is not None else np.full(len(p), -1.0, np.float32))
+        self.all_cause.append(cause.detach().cpu().numpy().astype(np.int16) if cause is not None else np.full(len(p), -1, np.int16))
         if latency_ms is not None:
             self.latencies.append(latency_ms)
-        self.n_missed += int(n_missed)
         if stage_ms:
             for k, v in stage_ms.items():
                 self.stages.setdefault(k, []).append(float(v))
+        self.add_missed(n_missed, missed_ttc, missed_cause)
 
-    def add_missed(self, n_missed: int):
-        """Record positives of a snapshot that had no scored pairs at all."""
-        self.n_missed += int(n_missed)
+    def add_missed(self, n_missed: int, missed_ttc: Optional[torch.Tensor] = None,
+                   missed_cause: Optional[torch.Tensor] = None):
+        """Record positives of a snapshot that were not scored."""
+        n_missed = int(n_missed)
+        if n_missed <= 0:
+            return
+        self.n_missed += n_missed
+        self.missed_ttc.append(missed_ttc.detach().cpu().numpy() if missed_ttc is not None
+                               else np.full(n_missed, -1.0, np.float32))
+        self.missed_cause.append(missed_cause.detach().cpu().numpy().astype(np.int16) if missed_cause is not None
+                                 else np.full(n_missed, -1, np.int16))
+
+    def _per_regime(self, preds, labels, ttc, cause) -> Dict[str, Dict[str, float]]:
+        out: Dict[str, Dict[str, float]] = {}
+        predicted_pos = preds >= self.threshold
+        actual_pos = labels >= 0.5
+        m_ttc = np.concatenate(self.missed_ttc) if self.missed_ttc else np.zeros(0, np.float32)
+        m_cause = np.concatenate(self.missed_cause) if self.missed_cause else np.zeros(0, np.int16)
+
+        # Regimes partition the *positives* (negatives have no TTC / cause),
+        # so only recall-type quantities are defined per regime.
+        def block(name, mask_scored, mask_missed):
+            tp = int(np.sum(predicted_pos & actual_pos & mask_scored))
+            fn = int(np.sum(~predicted_pos & actual_pos & mask_scored)) + int(np.sum(mask_missed))
+            n_pos = tp + fn
+            out[name] = {
+                "cdr": tp / max(n_pos, 1),
+                "num_positives": n_pos,
+                "num_missed": int(np.sum(mask_missed)),
+            }
+
+        valid_ttc = ttc >= 0
+        block("hard", valid_ttc & (ttc <= self.ttc_boundary), (m_ttc >= 0) & (m_ttc <= self.ttc_boundary))
+        block("easy", valid_ttc & (ttc > self.ttc_boundary), (m_ttc >= 0) & (m_ttc > self.ttc_boundary))
+        for code, name in enumerate(CAUSE_NAMES):
+            if np.any(cause == code) or np.any(m_cause == code):
+                block(f"cause:{name}", cause == code, m_cause == code)
+        return out
 
     def compute(self) -> MetricResult:
         preds = np.concatenate(self.all_preds) if self.all_preds else np.zeros(0)
         labels = np.concatenate(self.all_labels) if self.all_labels else np.zeros(0)
+        ttc = np.concatenate(self.all_ttc) if self.all_ttc else np.zeros(0, np.float32)
+        cause = np.concatenate(self.all_cause) if self.all_cause else np.zeros(0, np.int16)
 
         predicted_pos = preds >= self.threshold
         actual_pos = labels >= 0.5
@@ -117,6 +169,7 @@ class ConflictMetrics:
             num_missed_positives=self.n_missed,
             stage_ms=stage_ms,
             stage_p95_ms=stage_p95,
+            per_regime=self._per_regime(preds, labels, ttc, cause),
         )
 
 

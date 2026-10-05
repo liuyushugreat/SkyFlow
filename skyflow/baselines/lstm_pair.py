@@ -62,7 +62,11 @@ class LSTMPair(nn.Module):
         if history is None:
             history = feats.unsqueeze(1)
 
-        _, (h_n, _) = self.encoder(history)
+        # cuDNN is disabled for the RNN: the cuDNN dropout-state teardown of a
+        # multi-layer LSTM aborts the process (0xC0000409) on Windows/CUDA 13
+        # (torch 2.14).  History length is 1, so the native kernel costs nothing.
+        with torch.backends.cudnn.flags(enabled=False):
+            _, (h_n, _) = self.encoder(history)
         embeddings = h_n[-1]
 
         pairs = snapshot.conflict_pairs
