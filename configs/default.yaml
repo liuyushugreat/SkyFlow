@@ -32,6 +32,18 @@ features:
 labels:
   mode: lookahead           # lookahead (30 s window) | instantaneous (legacy)
 
+temporal:
+  delta_mode: aoi           # aoi (age of information) | legacy (time since edge last seen)
+
+sim:
+  observation_model: adsb   # adsb (latency + loss + GPS noise) | legacy (observation == truth)
+  adsb_latency_s: [0.5, 1.2]  # per-UAV link latency, scalar or [lo, hi]
+  packet_loss: 0.0          # per-report loss probability
+  gps_cep_m: 2.5
+  weather_update_s: 5.0
+  registry_update_s: 10.0
+  corridor_update_s: 1.0
+
 training:
   epochs: 150
   batch_size: 32

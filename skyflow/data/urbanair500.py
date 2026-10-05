@@ -17,16 +17,32 @@ Labels (``label_mode``):
     violated at epoch e itself.
 
 Observation (``observation_model``):
+  * ``"adsb"`` (default): the edge node sees each UAV through its ADS-B
+    reports.  UAV *i* has a per-scenario link latency L_i ~ U(lat_lo, lat_hi);
+    the report generated at epoch g arrives at g + L_i and is lost with
+    probability ``packet_loss``.  The receiver keeps the freshest received
+    report, so the observed kinematics of *i* at epoch e are the true
+    kinematics at generation epoch g*(i) = max{g <= e - L_i : not lost},
+    plus GPS noise (horizontal sigma = CEP / 1.1774, vertical 1.5x) that is
+    fixed per report.  ``uav_last_rx_time[i] = g*(i) * dt`` is the report
+    timestamp, so the age of information is t - uav_last_rx_time.  Before
+    the first report arrives the filed departure state (epoch 0) is used.
+    Context sources are published periodically (``weather_update_s``,
+    ``registry_update_s``, ``corridor_update_s``) and expose their last
+    publish time via ``env_last_update_time``.
   * ``"legacy"``: observed state == true state at the same epoch (GPS walk
-    noise is folded into the truth, as in the original implementation).
-  * ``"adsb"``: added in S3/S6 (per-UAV ADS-B latency, packet loss, GPS noise).
+    noise folded into the truth, as in the original implementation).
+
+All observation randomness is pre-drawn into the TruthLog as unit variates,
+so ``observe(log, e, params)`` is a pure function and observation conditions
+(latency, loss, CEP) can be changed at evaluation time without re-simulating.
 """
 
 from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Dict, Iterator, List, Optional, Tuple
+from typing import Dict, Iterator, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import torch
@@ -35,7 +51,30 @@ from skyflow.data.tkg_builder import AirspaceState, TKGBuilder, TKGSnapshot
 
 SPLIT_IDS = {"train": 0, "val": 1, "test": 2}
 LABEL_MODES = ("lookahead", "instantaneous")
-OBSERVATION_MODELS = ("legacy",)
+OBSERVATION_MODELS = ("adsb", "legacy")
+CEP_TO_SIGMA = 1.0 / 1.1774          # 2-D Gaussian: CEP = 1.1774 sigma
+VERTICAL_SIGMA_FACTOR = 1.5
+
+
+def _latency_range(value: Union[float, Sequence[float]]) -> Tuple[float, float]:
+    if isinstance(value, (int, float)):
+        return float(value), float(value)
+    lo, hi = value
+    return float(lo), float(hi)
+
+
+@dataclass
+class ObservationParams:
+    """Observation conditions that can be varied at evaluation time."""
+    adsb_latency_s: Union[float, Tuple[float, float]] = (0.5, 1.2)
+    packet_loss: float = 0.0
+    gps_cep_m: float = 2.5
+    weather_update_s: float = 5.0
+    registry_update_s: float = 10.0
+    corridor_update_s: float = 1.0
+
+    def latency_range(self) -> Tuple[float, float]:
+        return _latency_range(self.adsb_latency_s)
 
 
 def scenario_seed(base_seed: int, split: str, scenario_idx: int) -> int:
@@ -90,6 +129,10 @@ class TruthLog:
     corridor_pairs: List[Tuple[int, int]]
     weather_gain: Optional[np.ndarray] = None   # (n_total, N_wx) wind scaling per cell
     weather_vis: Optional[np.ndarray] = None    # (n_total, N_wx) visibility (m)
+    # Unit variates for the observation layer (pure-function observe()).
+    latency_u: Optional[np.ndarray] = None      # (N,) U(0,1) -> per-UAV link latency
+    loss_u: Optional[np.ndarray] = None         # (n_total, N) U(0,1) -> lost iff u < p
+    gps_noise_unit: Optional[np.ndarray] = None # (n_total, N, 3) N(0,1) per report
 
     @property
     def num_uavs(self) -> int:
@@ -117,7 +160,11 @@ class UrbanAir500:
         seed: int = 42,
         label_mode: str = "lookahead",
         lookahead_s: float = 30.0,
-        observation_model: str = "legacy",
+        observation_model: str = "adsb",
+        packet_loss: float = 0.0,
+        weather_update_s: float = 5.0,
+        registry_update_s: float = 10.0,
+        corridor_update_s: float = 1.0,
     ):
         if label_mode not in LABEL_MODES:
             raise ValueError(f"label_mode must be one of {LABEL_MODES}, got {label_mode!r}")
@@ -142,6 +189,14 @@ class UrbanAir500:
         self.lookahead_s = lookahead_s
         self.observation_model = observation_model
         self.base_seed = seed
+        self.obs_params = ObservationParams(
+            adsb_latency_s=tuple(_latency_range(adsb_latency_range)),
+            packet_loss=packet_loss,
+            gps_cep_m=gps_cep,
+            weather_update_s=weather_update_s,
+            registry_update_s=registry_update_s,
+            corridor_update_s=corridor_update_s,
+        )
 
         self.rng = np.random.RandomState(seed)
         self._init_infrastructure()
@@ -277,6 +332,9 @@ class UrbanAir500:
             corridor_pairs=self._compute_corridor_pairs(plans),
             weather_gain=(1.0 + 0.1 * self.rng.randn(n_total, self.num_weather_cells)).astype(np.float32),
             weather_vis=self.rng.uniform(5000, 15000, (n_total, self.num_weather_cells)).astype(np.float32),
+            latency_u=self.rng.uniform(0.0, 1.0, N).astype(np.float32),
+            loss_u=self.rng.uniform(0.0, 1.0, (n_total, N)).astype(np.float32),
+            gps_noise_unit=self.rng.randn(n_total, N, 3).astype(np.float32),
         )
 
         for epoch in range(n_total):
@@ -351,15 +409,25 @@ class UrbanAir500:
     # ------------------------------------------------------------------ #
     # Observation
     # ------------------------------------------------------------------ #
-    def observe(self, log: TruthLog, epoch: int) -> AirspaceState:
-        """Return the airspace state as seen by the edge node at ``epoch``."""
+    def observe(
+        self,
+        log: TruthLog,
+        epoch: int,
+        params: Optional[ObservationParams] = None,
+    ) -> AirspaceState:
+        """Return the airspace state as seen by the edge node at ``epoch``.
+
+        ``params`` overrides the simulator's observation conditions (used to
+        re-evaluate an existing scenario under different latency / loss / CEP
+        without re-running the physics).
+        """
         if self.observation_model == "legacy":
             return self._observe_legacy(log, epoch)
-        raise NotImplementedError(self.observation_model)
+        return self._observe_adsb(log, epoch, params or self.obs_params)
 
-    def _observe_legacy(self, log: TruthLog, epoch: int) -> AirspaceState:
+    # -- shared helpers -------------------------------------------------- #
+    def _corridor_view(self, log: TruthLog, t: float):
         N = log.num_uavs
-        t = epoch * self.dt
         corridor_res = [(a, b, t, t + 120.0) for a, b in log.corridor_pairs]
         corridor_ids = np.zeros(N, dtype=np.float32)
         for ua, ub in log.corridor_pairs:
@@ -367,7 +435,20 @@ class UrbanAir500:
                 corridor_ids[ua] = 1.0
             if ub < N:
                 corridor_ids[ub] = 1.0
+        return corridor_res, corridor_ids
 
+    def _weather_view(self, log: TruthLog, epoch: int) -> np.ndarray:
+        return self._compute_weather_state(
+            epoch * self.dt, log.wind[epoch],
+            gain=None if log.weather_gain is None else log.weather_gain[epoch],
+            vis=None if log.weather_vis is None else log.weather_vis[epoch],
+        )
+
+    # -- legacy: observation == truth ------------------------------------ #
+    def _observe_legacy(self, log: TruthLog, epoch: int) -> AirspaceState:
+        N = log.num_uavs
+        t = epoch * self.dt
+        corridor_res, corridor_ids = self._corridor_view(log, t)
         wind = log.wind[epoch]
         local_wind = np.tile(wind, (N, 1)).astype(np.float32) + log.local_wind_noise[epoch]
         positions = log.positions[epoch]
@@ -380,11 +461,7 @@ class UrbanAir500:
             uav_priority=log.priorities.copy(),
             uav_avoiding=np.zeros(N, dtype=bool),
             sector_occupancy=self._compute_sector_occupancy(positions),
-            weather_cells=self._compute_weather_state(
-                t, wind,
-                gain=None if log.weather_gain is None else log.weather_gain[epoch],
-                vis=None if log.weather_vis is None else log.weather_vis[epoch],
-            ),
+            weather_cells=self._weather_view(log, epoch),
             restricted_zones=self.restricted_zones.copy(),
             corridor_reservations=corridor_res,
             epoch_time=t,
@@ -394,6 +471,85 @@ class UrbanAir500:
             uav_corridor_ids=corridor_ids,
             uav_local_wind=local_wind,
             uav_gps_dop=log.gps_dop[epoch].copy(),
+        )
+
+    # -- adsb: latency + loss + GPS noise -------------------------------- #
+    def reception_epochs(
+        self, log: TruthLog, epoch: int, params: Optional[ObservationParams] = None
+    ) -> np.ndarray:
+        """Generation epoch g*(i) of the freshest ADS-B report received by
+        the edge node at ``epoch`` (``-1`` if nothing received yet)."""
+        params = params or self.obs_params
+        N = log.num_uavs
+        lo, hi = params.latency_range()
+        lat_u = log.latency_u if log.latency_u is not None else np.zeros(N, np.float32)
+        lat_frames = np.rint((lo + (hi - lo) * lat_u) / self.dt).astype(np.int64)
+        g_max = epoch - lat_frames                                   # (N,)
+
+        if params.packet_loss <= 0.0 or log.loss_u is None:
+            return np.where(g_max >= 0, g_max, -1)
+
+        ok = log.loss_u[: epoch + 1] >= params.packet_loss            # (e+1, N)
+        idx = np.where(ok, np.arange(epoch + 1)[:, None], -1)
+        last_ok = np.maximum.accumulate(idx, axis=0)                 # (e+1, N)
+        g_star = np.full(N, -1, dtype=np.int64)
+        valid = g_max >= 0
+        g_star[valid] = last_ok[g_max[valid], np.nonzero(valid)[0]]
+        return g_star
+
+    def _observe_adsb(
+        self, log: TruthLog, epoch: int, params: ObservationParams
+    ) -> AirspaceState:
+        N = log.num_uavs
+        t = epoch * self.dt
+        g_star = self.reception_epochs(log, epoch, params)
+        g_used = np.where(g_star >= 0, g_star, 0)                    # fallback: departure state
+        rows = np.arange(N)
+
+        sigma_h = params.gps_cep_m * CEP_TO_SIGMA
+        noise = log.gps_noise_unit[g_used, rows] if log.gps_noise_unit is not None \
+            else np.zeros((N, 3), np.float32)
+        noise = noise * np.array([sigma_h, sigma_h, sigma_h * VERTICAL_SIGMA_FACTOR], np.float32)
+
+        positions = log.positions[g_used, rows] + noise
+        velocities = log.velocities[g_used, rows]
+        last_rx_time = (g_used * self.dt).astype(np.float32)
+
+        corridor_res, corridor_ids = self._corridor_view(log, t)
+        wind = log.wind[g_used]                                      # wind as reported
+        local_wind = wind + log.local_wind_noise[g_used, rows]
+
+        def _last_publish(period: float) -> float:
+            return math.floor(t / period + 1e-9) * period if period > 0 else t
+
+        env_last_update = {
+            "weather": _last_publish(params.weather_update_s),
+            "restricted": _last_publish(params.registry_update_s),
+            "sector": _last_publish(params.corridor_update_s),
+            "corridor": _last_publish(params.corridor_update_s),
+        }
+        wx_epoch = min(int(round(env_last_update["weather"] / self.dt)), log.n_total - 1)
+
+        return AirspaceState(
+            uav_positions=positions.astype(np.float32),
+            uav_velocities=velocities.copy(),
+            uav_headings=log.headings[g_used, rows].copy(),
+            uav_battery=log.battery[g_used, rows].copy(),
+            uav_priority=log.priorities.copy(),
+            uav_avoiding=np.zeros(N, dtype=bool),
+            sector_occupancy=self._compute_sector_occupancy(positions),
+            weather_cells=self._weather_view(log, wx_epoch),
+            restricted_zones=self.restricted_zones.copy(),
+            corridor_reservations=corridor_res,
+            epoch_time=t,
+            uav_heading_rates=log.heading_rates[g_used, rows].copy(),
+            uav_accelerations=log.accelerations[g_used, rows].copy(),
+            uav_battery_rates=log.battery_rates[g_used, rows].copy(),
+            uav_corridor_ids=corridor_ids,
+            uav_local_wind=local_wind.astype(np.float32),
+            uav_gps_dop=log.gps_dop[g_used, rows].copy(),
+            uav_last_rx_time=last_rx_time,
+            env_last_update_time=env_last_update,
         )
 
     # ------------------------------------------------------------------ #
@@ -487,18 +643,23 @@ class UrbanAir500:
         duration_seconds: float = 60.0,
         plans: Optional[List[UAVFlightPlan]] = None,
         label_every: int = 1,
+        obs_params: Optional[ObservationParams] = None,
+        log: Optional[TruthLog] = None,
     ) -> Iterator[Tuple[AirspaceState, List[ConflictEvent]]]:
         """Run a scenario and yield (observed state, conflicts) at each epoch.
 
         ``label_every``: compute labels only every k-th epoch (others yield
         an empty list).  Labels are comparatively expensive in look-ahead mode.
+        ``obs_params``: override observation conditions.  ``log``: reuse an
+        existing TruthLog instead of re-running the physics.
         """
-        if plans is None:
-            plans = self.generate_flight_plans(self.num_uavs)
-        extra = self.lookahead_s if self.label_mode == "lookahead" else 0.0
-        log = self.run_physics(plans, duration_seconds, extra_seconds=extra)
+        if log is None:
+            if plans is None:
+                plans = self.generate_flight_plans(self.num_uavs)
+            extra = self.lookahead_s if self.label_mode == "lookahead" else 0.0
+            log = self.run_physics(plans, duration_seconds, extra_seconds=extra)
         for epoch in range(log.n_epochs):
-            state = self.observe(log, epoch)
+            state = self.observe(log, epoch, obs_params)
             conflicts = self.label(log, epoch) if epoch % label_every == 0 else []
             yield state, conflicts
 
@@ -547,6 +708,7 @@ class UrbanAir500:
         scenario_duration: float = 60.0,
         device: torch.device = torch.device("cpu"),
         builder: Optional[TKGBuilder] = None,
+        obs_params: Optional[ObservationParams] = None,
     ) -> List[Tuple[TKGSnapshot, torch.Tensor]]:
         """Generate a full dataset split as list of (snapshot, labels).
 
@@ -567,7 +729,9 @@ class UrbanAir500:
             plans = self.generate_flight_plans(self.num_uavs)
 
             for epoch_idx, (state, conflicts) in enumerate(
-                self.simulate_scenario(scenario_duration, plans, label_every=epoch_step)
+                self.simulate_scenario(
+                    scenario_duration, plans, label_every=epoch_step, obs_params=obs_params
+                )
             ):
                 if epoch_idx % epoch_step != 0:
                     continue

@@ -93,6 +93,12 @@ class AirspaceState:
     uav_corridor_ids: Optional[np.ndarray] = None     # (N_uav,) corridor assignment
     uav_local_wind: Optional[np.ndarray] = None       # (N_uav, 3) local wind estimate
     uav_gps_dop: Optional[np.ndarray] = None          # (N_uav,) GPS dilution of precision
+    # Age-of-information bookkeeping (None => everything is fresh, AoI = 0)
+    uav_last_rx_time: Optional[np.ndarray] = None     # (N_uav,) timestamp of freshest report
+    env_last_update_time: Optional[Dict[str, float]] = None  # per context source
+
+
+DELTA_MODES = ("aoi", "legacy")
 
 
 @dataclass
@@ -126,13 +132,17 @@ class TKGBuilder:
         weather_radius: float = 400.0,
         feature_dim: Optional[int] = None,
         leakage_free: bool = True,
+        delta_mode: str = "aoi",
     ):
+        if delta_mode not in DELTA_MODES:
+            raise ValueError(f"delta_mode must be one of {DELTA_MODES}, got {delta_mode!r}")
         self.approach_cpa_h = approach_cpa_h
         self.approach_cpa_v = approach_cpa_v
         self.approach_lookahead = approach_lookahead
         self.corridor_lookahead = corridor_lookahead
         self.weather_radius = weather_radius
         self.leakage_free = leakage_free
+        self.delta_mode = delta_mode
 
         self.relations = relation_vocab(leakage_free)
         self.relation_names = sorted(self.relations, key=self.relations.get)
@@ -148,6 +158,7 @@ class TKGBuilder:
         self._last_edge_times: Dict[str, Dict[Tuple[int, int], float]] = {
             r: {} for r in self.relations
         }
+        self._aoi_ctx: Tuple[np.ndarray, Dict[str, float]] = (np.zeros(0, np.float32), {})
 
     # ------------------------------------------------------------------ #
     def build(
@@ -163,6 +174,9 @@ class TKGBuilder:
         node_features = self._build_node_features(state, n_total, n_uav, n_sec, n_wx, n_rz)
         node_types = self._build_node_types(n_uav, n_sec, n_wx, n_rz)
 
+        uav_aoi = self._uav_aoi(state, n_uav)
+        env_age = self._env_age(state)
+        self._aoi_ctx = (uav_aoi, env_age)
         edge_indices, edge_deltas = self._build_edges(state, n_uav, n_sec, n_wx, n_rz)
 
         ei_tensors = {
@@ -183,9 +197,26 @@ class TKGBuilder:
             edge_deltas=ed_tensors,
             num_uavs=n_uav,
             num_nodes=n_total,
+            uav_aoi=torch.tensor(uav_aoi, dtype=torch.float32, device=device),
             relation_names=list(self.relation_names),
             feature_names=list(self.uav_features),
         )
+
+    # ------------------------------------------------------------------ #
+    # Age of information
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    def _uav_aoi(state: AirspaceState, n_uav: int) -> np.ndarray:
+        """AoI_i = t - t_rx(i); zero when the state carries no reception times."""
+        if state.uav_last_rx_time is None:
+            return np.zeros(n_uav, dtype=np.float32)
+        return np.maximum(state.epoch_time - state.uav_last_rx_time[:n_uav], 0.0).astype(np.float32)
+
+    @staticmethod
+    def _env_age(state: AirspaceState) -> Dict[str, float]:
+        if not state.env_last_update_time:
+            return {}
+        return {k: max(state.epoch_time - v, 0.0) for k, v in state.env_last_update_time.items()}
 
     # ------------------------------------------------------------------ #
     def _build_node_features(
@@ -288,6 +319,24 @@ class TKGBuilder:
         return edge_indices, edge_deltas
 
     def _edge_delta(self, relation: str, key: Tuple[int, int], t: float) -> float:
+        """δ for a UAV–UAV edge.
+
+        aoi    : δ_ij = t - min(t_rx(i), t_rx(j)) = max(AoI_i, AoI_j)
+        legacy : elapsed time since this edge was last present in the graph
+        """
+        if self.delta_mode == "aoi":
+            uav_aoi, _ = self._aoi_ctx
+            i, j = key
+            return float(max(uav_aoi[i], uav_aoi[j]))
+        delta = t - self._last_edge_times[relation].get(key, t)
+        self._last_edge_times[relation][key] = t
+        return delta
+
+    def _env_edge_delta(self, relation: str, key: Tuple[int, int], t: float, source: str) -> float:
+        """δ for a UAV–context edge: age of the context source's last publish."""
+        if self.delta_mode == "aoi":
+            _, env_age = self._aoi_ctx
+            return float(env_age.get(source, 0.0))
         delta = t - self._last_edge_times[relation].get(key, t)
         self._last_edge_times[relation][key] = t
         return delta
@@ -368,7 +417,7 @@ class TKGBuilder:
                 d = np.linalg.norm(state.uav_positions[i, :2] - wx_positions[w, :2])
                 if d < self.weather_radius:
                     wx_node = wx_offset + w
-                    delta = self._edge_delta(r_wind, (i, wx_node), t)
+                    delta = self._env_edge_delta(r_wind, (i, wx_node), t, "weather")
                     edge_indices[r_wind][0].append(wx_node)
                     edge_indices[r_wind][1].append(i)
                     edge_deltas[r_wind].append(delta)
@@ -384,7 +433,7 @@ class TKGBuilder:
                 d = np.linalg.norm(state.uav_positions[i, :2] - rz_center[:2])
                 if d < rz_radius * 1.5:
                     rz_node = rz_offset + z
-                    delta = self._edge_delta(r, (i, rz_node), t)
+                    delta = self._env_edge_delta(r, (i, rz_node), t, "restricted")
                     edge_indices[r][0].append(rz_node)
                     edge_indices[r][1].append(i)
                     edge_deltas[r].append(delta)

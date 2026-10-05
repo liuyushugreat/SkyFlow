@@ -54,6 +54,27 @@ class LabelsConfig:
     mode: str = "lookahead"         # "lookahead" (30 s window) | "instantaneous" (legacy)
 
 
+@dataclass
+class TemporalConfig:
+    """Definition of the edge time offset δ fed to φ(δ) (S3)."""
+    delta_mode: str = "aoi"         # "aoi" (age of information) | "legacy" (time since edge last seen)
+
+
+@dataclass
+class SimConfig:
+    """Observation-layer parameters of the UrbanAir-500 simulator (S3/S6).
+
+    Training defaults reproduce the paper's claimed conditions
+    (ADS-B latency 0.5–1.2 s, GPS CEP 2.5 m, no packet loss)."""
+    observation_model: str = "adsb"           # "adsb" | "legacy" (observation == truth)
+    adsb_latency_s: List[float] = field(default_factory=lambda: [0.5, 1.2])  # scalar or [lo, hi]
+    packet_loss: float = 0.0                  # per-report loss probability, 0–0.3
+    gps_cep_m: float = 2.5
+    weather_update_s: float = 5.0
+    registry_update_s: float = 10.0
+    corridor_update_s: float = 1.0
+
+
 PAPER_SEEDS = [42, 123, 456, 789, 1024]
 
 
@@ -73,7 +94,7 @@ class TrainingConfig:
     device: str = "auto"
 
 
-_SECTIONS = ("model", "data", "training", "features", "labels")
+_SECTIONS = ("model", "data", "training", "features", "labels", "temporal", "sim")
 
 
 @dataclass
@@ -83,6 +104,8 @@ class SkyFlowConfig:
     training: TrainingConfig = field(default_factory=TrainingConfig)
     features: FeaturesConfig = field(default_factory=FeaturesConfig)
     labels: LabelsConfig = field(default_factory=LabelsConfig)
+    temporal: TemporalConfig = field(default_factory=TemporalConfig)
+    sim: SimConfig = field(default_factory=SimConfig)
     output_dir: str = "outputs"
 
     # ------------------------------------------------------------------ #
@@ -106,15 +129,35 @@ class SkyFlowConfig:
         labels = getattr(self, "labels", None)
         return labels.mode if labels is not None else "instantaneous"
 
+    def delta_mode(self) -> str:
+        temporal = getattr(self, "temporal", None)
+        return temporal.delta_mode if temporal is not None else "legacy"
+
     def make_builder(self):
         from skyflow.data.tkg_builder import TKGBuilder
         return TKGBuilder(
             feature_dim=self.data.uav_feature_dim,
             leakage_free=self.leakage_free(),
+            delta_mode=self.delta_mode(),
+        )
+
+    def observation_params(self):
+        from skyflow.data.urbanair500 import ObservationParams
+        sim = getattr(self, "sim", None) or SimConfig()
+        lat = sim.adsb_latency_s
+        return ObservationParams(
+            adsb_latency_s=tuple(lat) if isinstance(lat, (list, tuple)) else float(lat),
+            packet_loss=sim.packet_loss,
+            gps_cep_m=sim.gps_cep_m,
+            weather_update_s=sim.weather_update_s,
+            registry_update_s=sim.registry_update_s,
+            corridor_update_s=sim.corridor_update_s,
         )
 
     def make_simulator(self, num_uavs: Optional[int] = None, seed: Optional[int] = None):
         from skyflow.data.urbanair500 import UrbanAir500
+        sim = getattr(self, "sim", None) or SimConfig()
+        obs = self.observation_params()
         return UrbanAir500(
             num_uavs=num_uavs if num_uavs is not None else self.data.num_uavs,
             grid_size=self.data.grid_size_m,
@@ -122,11 +165,18 @@ class SkyFlowConfig:
             num_weather_cells=self.data.num_weather_cells,
             num_restricted_zones=self.data.num_restricted_zones,
             dt=1.0 / self.data.sim_freq_hz,
+            gps_cep=obs.gps_cep_m,
+            adsb_latency_range=obs.latency_range(),
             conflict_h_sep=self.data.conflict_h_sep_m,
             conflict_v_sep=self.data.conflict_v_sep_m,
             seed=seed if seed is not None else self.training.seed,
             label_mode=self.label_mode(),
             lookahead_s=self.data.lookahead_seconds,
+            observation_model=sim.observation_model,
+            packet_loss=obs.packet_loss,
+            weather_update_s=obs.weather_update_s,
+            registry_update_s=obs.registry_update_s,
+            corridor_update_s=obs.corridor_update_s,
         )
 
     # ------------------------------------------------------------------ #
