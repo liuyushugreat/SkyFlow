@@ -77,6 +77,12 @@ class ScoringConfig:
 
 
 @dataclass
+class BaselinesConfig:
+    """Baseline-specific knobs (S5)."""
+    cpa_rule_thresholds: str = "val_search"   # "val_search" (grid-search on val, by F1) | "label" (10 m / 3 m)
+
+
+@dataclass
 class SimConfig:
     """Observation-layer parameters of the UrbanAir-500 simulator (S3/S6).
 
@@ -110,7 +116,7 @@ class TrainingConfig:
     device: str = "auto"
 
 
-_SECTIONS = ("model", "data", "training", "features", "labels", "temporal", "sim", "graph", "scoring")
+_SECTIONS = ("model", "data", "training", "features", "labels", "temporal", "sim", "graph", "scoring", "baselines")
 
 
 @dataclass
@@ -124,6 +130,7 @@ class SkyFlowConfig:
     sim: SimConfig = field(default_factory=SimConfig)
     graph: GraphConfig = field(default_factory=GraphConfig)
     scoring: ScoringConfig = field(default_factory=ScoringConfig)
+    baselines: BaselinesConfig = field(default_factory=BaselinesConfig)
     output_dir: str = "outputs"
 
     # ------------------------------------------------------------------ #

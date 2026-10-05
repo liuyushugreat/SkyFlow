@@ -20,11 +20,7 @@ import numpy as np
 
 from skyflow.config import SkyFlowConfig
 from skyflow.data.urbanair500 import UrbanAir500
-from skyflow.baselines.velocity_obstacle import VelocityObstacle
-from skyflow.baselines.lstm_pair import LSTMPair
-from skyflow.baselines.transformer_pair import TransformerPair
-from skyflow.baselines.stgcn import STGCN
-from skyflow.baselines.gat_static import GATStatic
+from skyflow.baselines.registry import BASELINE_ORDER, get_baseline, is_deterministic
 from skyflow.training.metrics import ConflictMetrics, LatencyTimer
 from skyflow.training.losses import FocalLoss
 from skyflow.utils.visualization import generate_all_figures
@@ -77,9 +73,11 @@ def evaluate_model(model, test_data, cfg, device, is_deterministic=False):
                     preds = model.predict(snapshot)
                 else:
                     preds = model(snapshot)
+            n_missed = getattr(snapshot, "num_missed_positives", 0)
             if preds.numel() == 0:
+                metrics.add_missed(n_missed)
                 continue
-            metrics.update(preds.to(device), labels, latency_ms=timer.elapsed_ms)
+            metrics.update(preds.to(device), labels, latency_ms=timer.elapsed_ms, n_missed=n_missed)
 
     return metrics.compute()
 
@@ -110,55 +108,34 @@ def main():
     dur = 10.0 if args.quick else 60.0
 
     train_data = sim.generate_dataset("train", n_sc, dur, device, **ds_kw)
+    val_data = sim.generate_dataset("val", max(n_sc // 2, 1), dur, device, **ds_kw)
     test_data = sim.generate_dataset("test", max(n_sc // 2, 1), dur, device, **ds_kw)
 
-    logger.info(f"Train: {len(train_data)}, Test: {len(test_data)}")
+    logger.info(f"Train: {len(train_data)}, Val: {len(val_data)}, Test: {len(test_data)}")
 
     epochs = cfg.training.epochs
     all_results = {}
 
-    # 1. Velocity Obstacle (deterministic)
-    logger.info("\n--- Velocity Obstacle ---")
-    vo = VelocityObstacle()
-    result = evaluate_model(vo, test_data, cfg, device, is_deterministic=True)
-    all_results["VO"] = _to_dict(result)
-    logger.info(f"  CDR: {result.cdr:.4f}, FAR: {result.far:.4f}, F1: {result.f1:.4f}, Latency: {result.latency_ms:.1f}ms")
-
-    # 2. LSTM-Pair
-    logger.info("\n--- LSTM-Pair ---")
-    lstm = LSTMPair(input_dim=cfg.uav_feature_dim()).to(device)
-    logger.info(f"  Parameters: {lstm.count_parameters():,}")
-    train_baseline(lstm, train_data, test_data, cfg, device, epochs)
-    result = evaluate_model(lstm, test_data, cfg, device)
-    all_results["LSTM-P"] = _to_dict(result)
-    logger.info(f"  CDR: {result.cdr:.4f}, FAR: {result.far:.4f}, F1: {result.f1:.4f}, Latency: {result.latency_ms:.1f}ms")
-
-    # 3. Transformer-Pair
-    logger.info("\n--- Transformer-Pair ---")
-    tfm = TransformerPair(input_dim=cfg.uav_feature_dim()).to(device)
-    logger.info(f"  Parameters: {tfm.count_parameters():,}")
-    train_baseline(tfm, train_data, test_data, cfg, device, epochs)
-    result = evaluate_model(tfm, test_data, cfg, device)
-    all_results["Tfm-P"] = _to_dict(result)
-    logger.info(f"  CDR: {result.cdr:.4f}, FAR: {result.far:.4f}, F1: {result.f1:.4f}, Latency: {result.latency_ms:.1f}ms")
-
-    # 4. STGCN
-    logger.info("\n--- STGCN ---")
-    stgcn = STGCN(input_dim=cfg.uav_feature_dim()).to(device)
-    logger.info(f"  Parameters: {stgcn.count_parameters():,}")
-    train_baseline(stgcn, train_data, test_data, cfg, device, epochs)
-    result = evaluate_model(stgcn, test_data, cfg, device)
-    all_results["STGCN"] = _to_dict(result)
-    logger.info(f"  CDR: {result.cdr:.4f}, FAR: {result.far:.4f}, F1: {result.f1:.4f}, Latency: {result.latency_ms:.1f}ms")
-
-    # 5. GAT-Static
-    logger.info("\n--- GAT-Static ---")
-    gat = GATStatic(input_dim=cfg.uav_feature_dim()).to(device)
-    logger.info(f"  Parameters: {gat.count_parameters():,}")
-    train_baseline(gat, train_data, test_data, cfg, device, epochs)
-    result = evaluate_model(gat, test_data, cfg, device)
-    all_results["GAT-S"] = _to_dict(result)
-    logger.info(f"  CDR: {result.cdr:.4f}, FAR: {result.far:.4f}, F1: {result.f1:.4f}, Latency: {result.latency_ms:.1f}ms")
+    for name in BASELINE_ORDER:
+        logger.info(f"\n--- {name} ---")
+        model = get_baseline(name, cfg, device)
+        deterministic = is_deterministic(name)
+        if deterministic:
+            if hasattr(model, "fit"):
+                # NOTE: val split; the test split is never used for threshold selection
+                model.fit(val_data)
+                logger.info(f"  thresholds: {model.describe()}")
+        else:
+            logger.info(f"  Parameters: {model.count_parameters():,}")
+            train_baseline(model, train_data, val_data, cfg, device, epochs)
+        result = evaluate_model(model, test_data, cfg, device, is_deterministic=deterministic)
+        all_results[name] = _to_dict(result)
+        if hasattr(model, "describe"):
+            all_results[name]["config"] = model.describe()
+        logger.info(
+            f"  CDR: {result.cdr:.4f}, FAR: {result.far:.4f}, F1: {result.f1:.4f}, "
+            f"missed: {result.num_missed_positives}, Latency: {result.latency_ms:.1f}ms"
+        )
 
     output_dir = Path(cfg.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -190,6 +167,8 @@ def _to_dict(result):
         "f1": result.f1,
         "precision": result.precision,
         "latency_ms": result.latency_ms,
+        "num_positives": result.num_positives,
+        "num_missed_positives": result.num_missed_positives,
     }
 
 

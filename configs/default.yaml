@@ -42,6 +42,9 @@ scoring:
   candidates: proximity     # proximity (pairs able to conflict within the window) | edges | all | sampled (legacy)
   proximity_margin_m: 50.0  # slack for GPS noise / speed changes
 
+baselines:
+  cpa_rule_thresholds: val_search   # val_search (grid-search d_h, d_v on val by F1) | label (10 m / 3 m)
+
 sim:
   observation_model: adsb   # adsb (latency + loss + GPS noise) | legacy (observation == truth)
   adsb_latency_s: [0.5, 1.2]  # per-UAV link latency, scalar or [lo, hi]
