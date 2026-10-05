@@ -65,6 +65,25 @@ DENSE_START_AREA_PER_UAV = 5.0  # effective start square side = N * this (m), ca
 CEP_TO_SIGMA = 1.0 / 1.1774          # 2-D Gaussian: CEP = 1.1774 sigma
 VERTICAL_SIGMA_FACTOR = 1.5
 
+# --- Conflict causes (synthetic injection; see docs) -------------------------
+# Each UAV carries one cause.  A conflict's cause is the highest-ranked cause
+# among its two UAVs; two ordinary UAVs give "planned_crossing".
+CAUSES = ("planned_crossing", "wind_deviation", "nonconforming", "priority_insertion", "noncooperative")
+CAUSE_CODES = {c: i for i, c in enumerate(CAUSES)}
+CAUSE_RANK = {"planned_crossing": 0, "wind_deviation": 1, "nonconforming": 2,
+              "priority_insertion": 3, "noncooperative": 4}
+DEFAULT_CAUSE_MIX: Dict[str, float] = {
+    "planned_crossing": 0.80, "nonconforming": 0.08, "wind_deviation": 0.06,
+    "priority_insertion": 0.03, "noncooperative": 0.03,
+}
+WIND_DEVIATION_DRIFT_MPS = (2.0, 4.0)     # persistent cross-track drift of a wind-deviating UAV
+NONCONFORMING_OFFSET_M = (100.0, 300.0)   # lateral offset applied to a leg's target
+NONCONFORMING_LEG_PROB = 0.6              # probability that a given leg deviates
+PRIORITY_INSERTION_START_S = (10.0, 30.0)
+PRIORITY_INSERTION_SPEED_MPS = (20.0, 25.0)
+NONCOOP_EXTRA_LATENCY_S = 3.0             # surveillance-sensor latency added for non-cooperative UAVs
+NONCOOP_NOISE_FACTOR = 4.0                # and coarser position estimates
+
 
 def _latency_range(value: Union[float, Sequence[float]]) -> Tuple[float, float]:
     if isinstance(value, (int, float)):
@@ -97,10 +116,14 @@ def scenario_seed(base_seed: int, split: str, scenario_idx: int) -> int:
 @dataclass
 class UAVFlightPlan:
     uav_id: int
-    waypoints: np.ndarray       # (W, 3) sequence of [x, y, z]
+    waypoints: np.ndarray       # (W, 3) sequence of [x, y, z]  (as filed)
     priority: int               # 0=low, 1=normal, 2=high, 3=emergency
     cruise_speed: float         # m/s
     start_time: float           # seconds
+    cause: str = "planned_crossing"
+    deviations: Optional[np.ndarray] = None   # (W, 3) flown-target offsets (nonconforming)
+    wind_drift: Optional[np.ndarray] = None   # (3,) persistent drift m/s (wind_deviation)
+    cooperative: bool = True                  # False -> no ADS-B (noncooperative)
 
 
 @dataclass
@@ -111,6 +134,7 @@ class ConflictEvent:
     time_to_conflict: float
     min_separation_h: float
     min_separation_v: float
+    cause: str = "planned_crossing"
 
 
 @dataclass
@@ -147,6 +171,14 @@ class TruthLog:
     # log can be observed later without re-generating the simulator state.
     infrastructure: Optional[Dict[str, np.ndarray]] = None
     scenario_id: Optional[Tuple[str, int]] = None   # (split, index)
+    causes: Optional[np.ndarray] = None             # (N,) int codes into CAUSES
+    cooperative: Optional[np.ndarray] = None        # (N,) bool
+
+    def cause_of_pair(self, i: int, j: int) -> str:
+        if self.causes is None:
+            return "planned_crossing"
+        ci, cj = CAUSES[int(self.causes[i])], CAUSES[int(self.causes[j])]
+        return ci if CAUSE_RANK[ci] >= CAUSE_RANK[cj] else cj
 
     @property
     def num_uavs(self) -> int:
@@ -180,6 +212,7 @@ class UrbanAir500:
         registry_update_s: float = 10.0,
         corridor_update_s: float = 1.0,
         density_preset: str = "dense",
+        cause_mix: Optional[Dict[str, float]] = "default",
     ):
         if label_mode not in LABEL_MODES:
             raise ValueError(f"label_mode must be one of {LABEL_MODES}, got {label_mode!r}")
@@ -190,6 +223,9 @@ class UrbanAir500:
         if density_preset not in DENSITY_PRESETS:
             raise ValueError(f"density_preset must be one of {DENSITY_PRESETS}, got {density_preset!r}")
         self.density_preset = density_preset
+        if isinstance(cause_mix, str):
+            cause_mix = dict(DEFAULT_CAUSE_MIX) if cause_mix == "default" else None
+        self.cause_mix = self._validate_cause_mix(cause_mix)
         self.num_uavs = num_uavs
         self.grid_size = grid_size
         self.altitude_range = altitude_range
@@ -279,6 +315,62 @@ class UrbanAir500:
             nodes.append([x, y, z])
         return np.array(nodes, dtype=np.float32)
 
+    @staticmethod
+    def _validate_cause_mix(mix: Optional[Dict[str, float]]) -> Optional[Dict[str, float]]:
+        if mix is None:
+            return None
+        unknown = set(mix) - set(CAUSES)
+        if unknown:
+            raise ValueError(f"unknown causes {sorted(unknown)}; allowed: {CAUSES}")
+        total = float(sum(mix.values()))
+        if total <= 0:
+            raise ValueError("cause_mix must have positive total weight")
+        return {c: float(mix.get(c, 0.0)) / total for c in CAUSES}
+
+    # ------------------------------------------------------------------ #
+    # Cause injection
+    # ------------------------------------------------------------------ #
+    def _inject_causes(self, plans: List[UAVFlightPlan]) -> None:
+        """Assign a cause to every plan and perturb it accordingly.  Called
+        *after* all ordinary plan draws so that ``cause_mix=None`` leaves the
+        RNG stream (and therefore the plans) untouched."""
+        if self.cause_mix is None:
+            return
+        probs = np.array([self.cause_mix[c] for c in CAUSES])
+        codes = self.rng.choice(len(CAUSES), size=len(plans), p=probs)
+        hubs = self.corridor_nodes
+        center = self.grid_size / 2.0
+        for plan, code in zip(plans, codes):
+            cause = CAUSES[int(code)]
+            plan.cause = cause
+            if cause == "wind_deviation":
+                ang = self.rng.uniform(0, 2 * np.pi)
+                mag = self.rng.uniform(*WIND_DEVIATION_DRIFT_MPS)
+                plan.wind_drift = np.array([mag * np.cos(ang), mag * np.sin(ang), 0.0], np.float32)
+            elif cause == "nonconforming":
+                dev = np.zeros_like(plan.waypoints)
+                for w in range(1, len(plan.waypoints)):
+                    if self.rng.rand() < NONCONFORMING_LEG_PROB:
+                        ang = self.rng.uniform(0, 2 * np.pi)
+                        mag = self.rng.uniform(*NONCONFORMING_OFFSET_M)
+                        dev[w, :2] = [mag * np.cos(ang), mag * np.sin(ang)]
+                plan.deviations = dev
+            elif cause == "priority_insertion":
+                # emergency flight entering late from the boundary, straight through a hub
+                hub = hubs[self.rng.randint(len(hubs))] if len(hubs) else np.array([center, center, 90.0], np.float32)
+                ang = self.rng.uniform(0, 2 * np.pi)
+                R = 0.5 * self.grid_size
+                entry = np.array([center + R * np.cos(ang), center + R * np.sin(ang)], np.float32)
+                entry = np.clip(entry, 50.0, self.grid_size - 50.0)
+                exit_pt = np.clip(2 * hub[:2] - entry, 50.0, self.grid_size - 50.0)
+                z = self._dense_altitude() if self.density_preset == "dense" else self.rng.uniform(*self.altitude_range)
+                plan.waypoints = np.array([[*entry, z], [*hub[:2], z], [*exit_pt, z]], np.float32)
+                plan.priority = 0
+                plan.cruise_speed = float(self.rng.uniform(*PRIORITY_INSERTION_SPEED_MPS))
+                plan.start_time = float(self.rng.uniform(*PRIORITY_INSERTION_START_S))
+            elif cause == "noncooperative":
+                plan.cooperative = False
+
     def _dense_altitude(self) -> float:
         layer = DENSE_ALTITUDE_LAYERS_M[self.rng.randint(len(DENSE_ALTITUDE_LAYERS_M))]
         z = layer + self.rng.uniform(-DENSE_LAYER_JITTER_M, DENSE_LAYER_JITTER_M)
@@ -331,6 +423,7 @@ class UrbanAir500:
                 cruise_speed=speed,
                 start_time=start,
             ))
+        self._inject_causes(plans)
         return plans
 
     # ------------------------------------------------------------------ #
@@ -356,17 +449,25 @@ class UrbanAir500:
         battery = np.ones(N, dtype=np.float32)
         priorities = np.zeros(N, dtype=np.int32)
         wp_idx = np.zeros(N, dtype=np.int32)
+        drift = np.zeros((N, 3), dtype=np.float32)
+        causes = np.zeros(N, dtype=np.int8)
+        cooperative = np.ones(N, dtype=bool)
 
         for plan in plans:
             uid = plan.uav_id
             positions[uid] = plan.waypoints[0]
             priorities[uid] = plan.priority
+            causes[uid] = CAUSE_CODES.get(plan.cause, 0)
+            cooperative[uid] = plan.cooperative
+            if plan.wind_drift is not None:
+                drift[uid] = plan.wind_drift
             if len(plan.waypoints) > 1:
                 d = plan.waypoints[1] - plan.waypoints[0]
                 dist = np.linalg.norm(d)
                 if dist > 1e-6:
                     velocities[uid] = d / dist * plan.cruise_speed
                     headings[uid] = np.arctan2(d[1], d[0])
+        has_drift = bool(np.any(drift != 0))
 
         log = TruthLog(
             dt=self.dt, n_epochs=n_epochs, n_total=n_total,
@@ -388,6 +489,8 @@ class UrbanAir500:
             loss_u=self.rng.uniform(0.0, 1.0, (n_total, N)).astype(np.float32),
             gps_noise_unit=self.rng.randn(n_total, N, 3).astype(np.float32),
             infrastructure=self.export_infrastructure(),
+            causes=causes,
+            cooperative=cooperative,
         )
 
         for epoch in range(n_total):
@@ -407,6 +510,8 @@ class UrbanAir500:
                     continue
 
                 target = plan.waypoints[wi + 1]
+                if plan.deviations is not None:
+                    target = target + plan.deviations[wi + 1]      # flown target != filed plan
                 to_target = target - positions[uid]
                 dist = np.linalg.norm(to_target)
 
@@ -421,6 +526,8 @@ class UrbanAir500:
                 headings[uid] = np.arctan2(velocities[uid][1], velocities[uid][0])
 
             positions += velocities * self.dt + gps_noise
+            if has_drift:
+                positions += drift * self.dt                         # wind pushes off-track; steering re-aims
             positions[:, :2] = np.clip(positions[:, :2], 0, self.grid_size)
             positions[:, 2] = np.clip(
                 positions[:, 2], self.altitude_range[0], self.altitude_range[1]
@@ -536,7 +643,11 @@ class UrbanAir500:
         N = log.num_uavs
         lo, hi = params.latency_range()
         lat_u = log.latency_u if log.latency_u is not None else np.zeros(N, np.float32)
-        lat_frames = np.rint((lo + (hi - lo) * lat_u) / self.dt).astype(np.int64)
+        latency = lo + (hi - lo) * lat_u
+        if log.cooperative is not None:
+            # non-cooperative targets are only seen through slower surveillance
+            latency = latency + np.where(log.cooperative, 0.0, NONCOOP_EXTRA_LATENCY_S)
+        lat_frames = np.rint(latency / self.dt).astype(np.int64)
         g_max = epoch - lat_frames                                   # (N,)
 
         if params.packet_loss <= 0.0 or log.loss_u is None:
@@ -563,6 +674,8 @@ class UrbanAir500:
         noise = log.gps_noise_unit[g_used, rows] if log.gps_noise_unit is not None \
             else np.zeros((N, 3), np.float32)
         noise = noise * np.array([sigma_h, sigma_h, sigma_h * VERTICAL_SIGMA_FACTOR], np.float32)
+        if log.cooperative is not None:
+            noise = noise * np.where(log.cooperative, 1.0, NONCOOP_NOISE_FACTOR)[:, None].astype(np.float32)
 
         positions = log.positions[g_used, rows] + noise
         velocities = log.velocities[g_used, rows]
@@ -652,11 +765,13 @@ class UrbanAir500:
             first = hit.argmax(axis=0)
             for idx in np.nonzero(any_hit)[0]:
                 k = int(first[idx])
+                i, j = int(a[idx]), int(b[idx])
                 events.append(ConflictEvent(
-                    uav_i=int(a[idx]), uav_j=int(b[idx]), epoch=epoch,
+                    uav_i=i, uav_j=j, epoch=epoch,
                     time_to_conflict=k * self.dt,
                     min_separation_h=float(dh[k, idx]),
                     min_separation_v=float(dv[k, idx]),
+                    cause=log.cause_of_pair(i, j),
                 ))
         return events
 
@@ -901,9 +1016,11 @@ class UrbanAir500:
         positives bookkeeping) on ``snapshot`` for the chosen candidate set."""
         n = snapshot.num_uavs
         ttc_mat = np.full((n, n), -1.0, dtype=np.float32)
+        cause_mat = np.full((n, n), -1, dtype=np.int8)
         for c in conflicts:
             ttc_mat[c.uav_i, c.uav_j] = c.time_to_conflict
             ttc_mat[c.uav_j, c.uav_i] = c.time_to_conflict
+            cause_mat[c.uav_i, c.uav_j] = cause_mat[c.uav_j, c.uav_i] = CAUSE_CODES.get(c.cause, 0)
 
         if candidates == "proximity":
             src, dst = self.proximity_candidates(snapshot, obs_params, proximity_margin_m)
@@ -935,6 +1052,9 @@ class UrbanAir500:
         snapshot.conflict_pairs = torch.tensor(np.stack([src, dst]), dtype=torch.long, device=device)
         snapshot.conflict_labels = torch.tensor(labels, dtype=torch.float32, device=device)
         snapshot.conflict_ttc = torch.tensor(ttcs, dtype=torch.float32, device=device)
+        snapshot.conflict_cause = torch.tensor(
+            cause_mat[src, dst] if src.size else np.zeros(0, np.int8), dtype=torch.int8, device=device
+        )
         snapshot.num_missed_positives = int(missed.sum())
         snapshot.missed_ttc = torch.tensor(missed_ttc, dtype=torch.float32, device=device)
 

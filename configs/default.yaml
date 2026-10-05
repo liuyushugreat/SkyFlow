@@ -48,6 +48,12 @@ baselines:
 sim:
   observation_model: adsb   # adsb (latency + loss + GPS noise) | legacy (observation == truth)
   density_preset: dense     # dense (4 altitude layers, hub-converging waypoints, N*5 m start area) | legacy
+  cause_mix:                # synthetic conflict-cause injection (per-UAV shares); null disables
+    planned_crossing: 0.80
+    nonconforming: 0.08     # flown targets offset 100-300 m from the filed plan
+    wind_deviation: 0.06    # persistent 2-4 m/s cross-track drift
+    priority_insertion: 0.03  # emergency flight entering at t=10-30 s straight through a hub
+    noncooperative: 0.03    # no ADS-B: +3 s surveillance latency, 4x position noise
   adsb_latency_s: [0.5, 1.2]  # per-UAV link latency, scalar or [lo, hi]
   packet_loss: 0.0          # per-report loss probability
   gps_cep_m: 2.5

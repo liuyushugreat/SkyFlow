@@ -16,7 +16,7 @@ from skyflow.data.urbanair500 import UrbanAir500, ObservationParams, CEP_TO_SIGM
 
 def _sim(**kw):
     base = dict(num_uavs=40, grid_size=1000.0, seed=11, num_sectors=4,
-                num_weather_cells=4, num_restricted_zones=2)
+                num_weather_cells=4, num_restricted_zones=2, cause_mix=None)
     base.update(kw)
     return UrbanAir500(**base)
 
@@ -42,7 +42,7 @@ class TestObservationConditions:
             s = sim.observe(log, e)
             diff = s.uav_positions - log.positions[e]
             expected = log.gps_noise_unit[e] * np.array([sigma_h, sigma_h, sigma_h * VERTICAL_SIGMA_FACTOR], np.float32)
-            assert np.allclose(diff, expected, atol=1e-4)
+            assert np.allclose(diff, expected, atol=5e-3)     # float32 at ~1e3 m scale
             assert np.array_equal(s.uav_velocities, log.velocities[e])
             assert np.all(s.uav_last_rx_time == pytest.approx(e * sim.dt))
         # with CEP -> 0 the observation equals the truth exactly

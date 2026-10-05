@@ -120,6 +120,7 @@ class TKGSnapshot:
     conflict_pairs: Optional[torch.Tensor] = None
     conflict_labels: Optional[torch.Tensor] = None
     conflict_ttc: Optional[torch.Tensor] = None        # (P,) seconds; -1 for negatives
+    conflict_cause: Optional[torch.Tensor] = None      # (P,) int8 code into urbanair500.CAUSES; -1 negatives
     uav_aoi: Optional[torch.Tensor] = None             # (N_uav,) age of information (s)
     relation_names: Optional[List[str]] = None
     feature_names: Optional[List[str]] = None

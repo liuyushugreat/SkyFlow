@@ -5,7 +5,7 @@ from __future__ import annotations
 import yaml
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 
 @dataclass
@@ -90,6 +90,12 @@ class SimConfig:
     (ADS-B latency 0.5–1.2 s, GPS CEP 2.5 m, no packet loss)."""
     observation_model: str = "adsb"           # "adsb" | "legacy" (observation == truth)
     density_preset: str = "dense"             # "dense" (layered airspace, hub-converging plans) | "legacy"
+    # Synthetic conflict-cause injection: per-UAV cause shares (normalised).
+    # null/None disables injection (all UAVs are ordinary planned flights).
+    cause_mix: Optional[Dict[str, float]] = field(default_factory=lambda: {
+        "planned_crossing": 0.80, "nonconforming": 0.08, "wind_deviation": 0.06,
+        "priority_insertion": 0.03, "noncooperative": 0.03,
+    })
     adsb_latency_s: List[float] = field(default_factory=lambda: [0.5, 1.2])  # scalar or [lo, hi]
     packet_loss: float = 0.0                  # per-report loss probability, 0–0.3
     gps_cep_m: float = 2.5
@@ -218,6 +224,7 @@ class SkyFlowConfig:
             lookahead_s=self.data.lookahead_seconds,
             observation_model=sim.observation_model,
             density_preset=getattr(sim, "density_preset", "dense"),
+            cause_mix=getattr(sim, "cause_mix", None),
             packet_loss=obs.packet_loss,
             weather_update_s=obs.weather_update_s,
             registry_update_s=obs.registry_update_s,
