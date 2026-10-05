@@ -50,11 +50,11 @@ def main():
     if ckpt_path.exists():
         ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
         model = TRGAT(
-            node_feature_dim=cfg.data.uav_feature_dim,
+            node_feature_dim=cfg.uav_feature_dim(),
             embed_dim=cfg.model.embed_dim,
             num_layers=cfg.model.num_layers,
             num_heads=cfg.model.num_heads,
-            num_relations=cfg.model.num_relation_types,
+            num_relations=cfg.num_relations(),
             temporal_dim=cfg.model.temporal_dim,
             recurrent_dim=cfg.model.recurrent_dim,
             dropout=0.0,
@@ -69,11 +69,11 @@ def main():
     else:
         logger.warning(f"No checkpoint at {ckpt_path}, using random weights")
         model = TRGAT(
-            node_feature_dim=cfg.data.uav_feature_dim,
+            node_feature_dim=cfg.uav_feature_dim(),
             embed_dim=cfg.model.embed_dim,
             num_layers=cfg.model.num_layers,
             num_heads=cfg.model.num_heads,
-            num_relations=cfg.model.num_relation_types,
+            num_relations=cfg.num_relations(),
             temporal_dim=cfg.model.temporal_dim,
             recurrent_dim=cfg.model.recurrent_dim,
             dropout=0.0,
@@ -90,8 +90,8 @@ def main():
     results = {}
     for n_uav in FLEET_SIZES:
         logger.info(f"\nEvaluating fleet size: {n_uav} UAVs")
-        sim = UrbanAir500(num_uavs=n_uav, seed=cfg.training.seed)
-        builder = TKGBuilder()
+        sim = cfg.make_simulator(num_uavs=n_uav)
+        builder = cfg.make_builder()
 
         graph_latencies = []
         fwd_latencies = []

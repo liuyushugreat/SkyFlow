@@ -17,7 +17,11 @@ from torch.optim.lr_scheduler import CosineAnnealingLR, LambdaLR, SequentialLR
 
 from skyflow.config import SkyFlowConfig
 from skyflow.models.tr_gat import TRGAT
-from skyflow.models.conflict_head import ConflictScoringHead
+from skyflow.models.conflict_head import (
+    ConflictScoringHead,
+    PAIR_EDGE_FEATURE_DIM,
+    build_pair_edge_features,
+)
 from skyflow.data.tkg_builder import TKGSnapshot
 from skyflow.training.losses import FocalLoss
 from skyflow.training.metrics import ConflictMetrics, LatencyTimer
@@ -56,11 +60,11 @@ class SkyFlowTrainer:
     def build_model(self) -> Tuple[TRGAT, ConflictScoringHead]:
         mc = self.cfg.model
         self.model = TRGAT(
-            node_feature_dim=self.cfg.data.uav_feature_dim,
+            node_feature_dim=self.cfg.uav_feature_dim(),
             embed_dim=mc.embed_dim,
             num_layers=mc.num_layers,
             num_heads=mc.num_heads,
-            num_relations=mc.num_relation_types,
+            num_relations=self.cfg.num_relations(),
             temporal_dim=mc.temporal_dim,
             recurrent_dim=mc.recurrent_dim,
             dropout=mc.dropout,
@@ -69,6 +73,7 @@ class SkyFlowTrainer:
         self.head = ConflictScoringHead(
             embed_dim=mc.embed_dim,
             recurrent_dim=mc.recurrent_dim,
+            edge_feature_dim=PAIR_EDGE_FEATURE_DIM,
             dropout=mc.dropout,
         ).to(self.device)
 
@@ -164,12 +169,7 @@ class SkyFlowTrainer:
                         rec_state = rec_state.detach()
                         continue
 
-                    h_i = node_emb[pairs[0]]
-                    h_j = node_emb[pairs[1]]
-                    s_i = rec_state[pairs[0]]
-                    s_j = rec_state[pairs[1]]
-
-                    preds = self.head(h_i, h_j, s_i, s_j)
+                    preds = self._score_pairs(snapshot, node_emb, rec_state, pairs)
                     step_loss = criterion(preds, labels)
                     window_loss = window_loss + step_loss
                     valid_steps += 1
@@ -249,12 +249,7 @@ class SkyFlowTrainer:
                     if pairs is None or pairs.size(1) == 0:
                         continue
 
-                    h_i = node_emb[pairs[0]]
-                    h_j = node_emb[pairs[1]]
-                    s_i = rec_state[pairs[0]]
-                    s_j = rec_state[pairs[1]]
-
-                    preds = self.head(h_i, h_j, s_i, s_j)
+                    preds = self._score_pairs(snapshot, node_emb, rec_state, pairs)
 
                 metrics.update(preds, labels, latency_ms=timer.elapsed_ms)
 
@@ -319,8 +314,27 @@ class SkyFlowTrainer:
             }
         return summary
 
+    def _score_pairs(
+        self,
+        snapshot: TKGSnapshot,
+        node_emb: torch.Tensor,
+        rec_state: torch.Tensor,
+        pairs: torch.Tensor,
+    ) -> torch.Tensor:
+        """Eq. (6): score pairs with leakage-free edge features e_ij."""
+        edge_feat = build_pair_edge_features(
+            snapshot.node_features, pairs, snapshot.uav_aoi
+        )
+        return self.head(
+            node_emb[pairs[0]], node_emb[pairs[1]],
+            rec_state[pairs[0]], rec_state[pairs[1]],
+            edge_feat=edge_feat,
+        )
+
     def _to_device(self, snapshot: TKGSnapshot) -> TKGSnapshot:
         snapshot.node_features = snapshot.node_features.to(self.device)
+        if snapshot.uav_aoi is not None:
+            snapshot.uav_aoi = snapshot.uav_aoi.to(self.device)
         snapshot.edge_indices = {
             r: e.to(self.device) for r, e in snapshot.edge_indices.items()
         }

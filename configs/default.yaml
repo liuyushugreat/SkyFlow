@@ -5,14 +5,14 @@ model:
   temporal_dim: 32
   recurrent_dim: 64
   dropout: 0.1
-  num_relation_types: 6
+  # num_relation_types is derived from features.leakage_free (5) unless set here.
 
 data:
   num_uavs: 500
   num_sectors: 64
   num_weather_cells: 36
   num_restricted_zones: 12
-  uav_feature_dim: 23
+  # uav_feature_dim is derived from features.leakage_free (20) unless set here.
   sector_feature_dim: 8
   weather_feature_dim: 12
   observation_window: 10
@@ -24,6 +24,13 @@ data:
   scenario_minutes_train: 3360
   scenario_minutes_val: 720
   scenario_minutes_test: 720
+
+features:
+  leakage_free: true        # false reproduces the MobiHoc-submission feature set
+  input_set: full           # full | telemetry_only
+
+labels:
+  mode: lookahead           # lookahead (30 s window) | instantaneous (legacy)
 
 training:
   epochs: 150

@@ -36,7 +36,13 @@ class TestTKGBuilder:
         snapshot = builder.build(state)
         assert snapshot.num_uavs == 10
         assert snapshot.num_nodes == 10 + 4 + 4 + 2
+        assert snapshot.node_features.shape == (20, 20)
+
+    def test_build_shape_legacy(self):
+        builder = TKGBuilder(leakage_free=False)
+        snapshot = builder.build(_make_state(n_uav=10))
         assert snapshot.node_features.shape == (20, 23)
+        assert builder.num_relations == 6
 
     def test_edge_types(self):
         builder = TKGBuilder()

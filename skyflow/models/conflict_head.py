@@ -4,37 +4,67 @@ Implements:
   p_ij = σ( MLP( [h_i^L ‖ h_j^L ‖ s_i ‖ s_j ‖ e_ij] ) )
 
 where h_i^L are final-layer TR-GAT embeddings (d=128), s_i are GRU
-recurrent states (d_s=64), and e_ij is a direct proximity edge feature
-(or a learned no-edge token for UAV pairs without an explicit edge).
-A pair is flagged as a conflict when p_ij >= τ (τ=0.42).
+recurrent states (d_s=64), and e_ij is a pair edge feature.
 
-Reference: Section 4.2, Equation (6) in the paper.
+Leakage-free e_ij (default, 7 dims):
+  e_ij = [ Δp / 100 m  (3) ‖ Δv / 10 m/s  (3) ‖ δ_ij / 1 s  (1) ]
+with Δp, Δv the *observed* relative position / velocity and δ_ij the pair
+age of information (max of the two UAVs' AoI; 0 when AoI is unavailable).
+It contains no CPA distance, CPA time or threshold decision.
+
+A pair is flagged as a conflict when p_ij >= τ.
 """
 
 from __future__ import annotations
 
+from typing import Optional
+
 import torch
 import torch.nn as nn
 
+PAIR_EDGE_FEATURE_DIM = 7
+POS_SCALE_M = 100.0
+VEL_SCALE_MPS = 10.0
+AOI_SCALE_S = 1.0
+
+
+def build_pair_edge_features(
+    node_features: torch.Tensor,
+    pairs: torch.Tensor,
+    uav_aoi: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """Compute e_ij for each scored pair from observed kinematics.
+
+    Args:
+        node_features: (N, D) with columns 0:3 = position, 3:6 = velocity.
+        pairs: (2, P) UAV index pairs.
+        uav_aoi: (N_uav,) age of information per UAV in seconds, or None.
+    Returns:
+        (P, PAIR_EDGE_FEATURE_DIM) tensor.
+    """
+    i, j = pairs[0], pairs[1]
+    dp = (node_features[j, 0:3] - node_features[i, 0:3]) / POS_SCALE_M
+    dv = (node_features[j, 3:6] - node_features[i, 3:6]) / VEL_SCALE_MPS
+    if uav_aoi is None:
+        delta = torch.zeros(i.size(0), 1, device=node_features.device, dtype=node_features.dtype)
+    else:
+        delta = torch.maximum(uav_aoi[i], uav_aoi[j]).unsqueeze(-1) / AOI_SCALE_S
+    return torch.cat([dp, dv, delta], dim=-1)
+
 
 class ConflictScoringHead(nn.Module):
-    """2-layer MLP producing per-pair conflict probability.
-
-    Input for pair (i,j):
-        [h_i ‖ h_j ‖ s_i ‖ s_j ‖ e_ij]
-    where h are final-layer embeddings, s are recurrent states,
-    and e_ij is the direct proximity edge feature (or learned no-edge token).
-    """
+    """2-layer MLP producing per-pair conflict probability."""
 
     def __init__(
         self,
         embed_dim: int = 128,
         recurrent_dim: int = 64,
-        edge_feature_dim: int = 16,
+        edge_feature_dim: int = PAIR_EDGE_FEATURE_DIM,
         hidden_dim: int = 256,
         dropout: float = 0.1,
     ):
         super().__init__()
+        self.edge_feature_dim = edge_feature_dim
         in_dim = 2 * embed_dim + 2 * recurrent_dim + edge_feature_dim
         self.net = nn.Sequential(
             nn.Linear(in_dim, hidden_dim),

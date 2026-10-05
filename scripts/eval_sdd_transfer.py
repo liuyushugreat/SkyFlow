@@ -125,11 +125,11 @@ def main():
 
     ckpt = torch.load(args.checkpoint, map_location=device, weights_only=False)
     model = TRGAT(
-        node_feature_dim=cfg.data.uav_feature_dim,
+        node_feature_dim=cfg.uav_feature_dim(),
         embed_dim=cfg.model.embed_dim,
         num_layers=cfg.model.num_layers,
         num_heads=cfg.model.num_heads,
-        num_relations=cfg.model.num_relation_types,
+        num_relations=cfg.num_relations(),
         temporal_dim=cfg.model.temporal_dim,
         recurrent_dim=cfg.model.recurrent_dim,
         dropout=0.0,

@@ -17,9 +17,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import torch
 
 from skyflow.config import SkyFlowConfig
-from skyflow.data.urbanair500 import UrbanAir500
 from skyflow.models.tr_gat import TRGAT
-from skyflow.models.conflict_head import ConflictScoringHead
+from skyflow.models.conflict_head import ConflictScoringHead, build_pair_edge_features
 from skyflow.training.metrics import ConflictMetrics, LatencyTimer
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -44,11 +43,11 @@ def main():
     cfg = ckpt.get("config", SkyFlowConfig.from_yaml(args.config))
 
     model = TRGAT(
-        node_feature_dim=cfg.data.uav_feature_dim,
+        node_feature_dim=cfg.uav_feature_dim(),
         embed_dim=cfg.model.embed_dim,
         num_layers=cfg.model.num_layers,
         num_heads=cfg.model.num_heads,
-        num_relations=cfg.model.num_relation_types,
+        num_relations=cfg.num_relations(),
         temporal_dim=cfg.model.temporal_dim,
         recurrent_dim=cfg.model.recurrent_dim,
         dropout=0.0,
@@ -57,6 +56,7 @@ def main():
     head = ConflictScoringHead(
         embed_dim=cfg.model.embed_dim,
         recurrent_dim=cfg.model.recurrent_dim,
+        edge_feature_dim=ckpt["head"]["no_edge_token"].numel(),
         dropout=0.0,
     ).to(device)
 
@@ -69,11 +69,12 @@ def main():
     logger.info(f"Parameters: {model.count_parameters():,}")
 
     n_uavs = 50 if args.quick else cfg.data.num_uavs
-    sim = UrbanAir500(num_uavs=n_uavs, seed=12345)
+    sim = cfg.make_simulator(num_uavs=n_uavs, seed=12345)
     test_data = sim.generate_dataset(
         "test", args.num_scenarios,
         10.0 if args.quick else 60.0,
         device,
+        builder=cfg.make_builder(),
     )
 
     metrics = ConflictMetrics(threshold=cfg.training.conflict_threshold)
@@ -100,6 +101,9 @@ def main():
                 preds = head(
                     node_emb[pairs[0]], node_emb[pairs[1]],
                     rec_state[pairs[0]], rec_state[pairs[1]],
+                    edge_feat=build_pair_edge_features(
+                        snapshot.node_features, pairs, snapshot.uav_aoi
+                    ),
                 )
 
             metrics.update(preds, labels, latency_ms=timer.elapsed_ms)

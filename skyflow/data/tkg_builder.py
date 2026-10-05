@@ -1,26 +1,30 @@
 """Temporal Knowledge Graph construction — Algorithm 1 in the paper.
 
 Constructs typed entity-relation-time graphs G_t = (V_t, E_t, R, τ)
-from four parallel data streams (Section 3.1):
-  - ADS-B telemetry → UAV nodes with 23-dim state vector (Eq. 1)
+from four parallel data streams:
+  - ADS-B telemetry → UAV nodes with a per-UAV state vector
   - Flight plans → corridor reservation edges (shares_corridor)
   - Weather grid → downwind influence edges (is_downwind_of)
-  - Corridor log → restricted zone proximity edges (is_restricted_by)
+  - Restricted-zone registry → proximity edges (is_restricted_by)
 
-Six relation types R (Section 3.2): approaches, conflicts_with,
-shares_corridor, is_downwind_of, has_reserved, is_restricted_by.
+Feature set (``leakage_free``):
+  * True (default, 20 dims): [x,y,z, vx,vy,vz, ψ,ψ̇, ax,ay,az, b,ḃ, p, c_id,
+    wx,wy,wz, σ_gps, n_nbr].  No CPA distance / CPA time / avoidance flag.
+  * False (legacy, 23 dims): the above + [d_min, t_cpa, f_avoid].
 
-Each edge carries elapsed time δ since last observation, fed to
-the sinusoidal temporal encoding φ(δ) in Eq. (2).
+Relation vocabulary (``leakage_free``):
+  * True (default, 5 types): approaches, shares_corridor, is_downwind_of,
+    has_reserved, is_restricted_by.
+  * False (legacy, 6 types): the above + conflicts_with (CPA < 0.3·D_appr).
 
-Designed to execute in < 12 ms on benchmark hardware (Table 7).
-
-Reference: Section 3 and Algorithm 1 in the paper.
+``approaches`` edges are still gated by a linear-CPA test, but the CPA
+*values* never enter any feature.  Each edge carries an elapsed time δ that
+feeds the sinusoidal temporal encoding φ(δ).
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -29,7 +33,7 @@ import torch
 
 ENTITY_TYPES = {"uav": 0, "sector": 1, "weather": 2, "restricted": 3}
 
-RELATION_VOCAB = {
+LEGACY_RELATION_VOCAB: Dict[str, int] = {
     "approaches": 0,
     "conflicts_with": 1,
     "shares_corridor": 2,
@@ -38,10 +42,39 @@ RELATION_VOCAB = {
     "is_restricted_by": 5,
 }
 
+LEAKAGE_FREE_RELATION_VOCAB: Dict[str, int] = {
+    "approaches": 0,
+    "shares_corridor": 1,
+    "is_downwind_of": 2,
+    "has_reserved": 3,
+    "is_restricted_by": 4,
+}
+
+# Backward-compatible alias (legacy numbering).
+RELATION_VOCAB = LEGACY_RELATION_VOCAB
+
+LEGACY_UAV_FEATURES: List[str] = [
+    "x", "y", "z", "vx", "vy", "vz", "psi", "psi_dot",
+    "ax", "ay", "az", "b", "b_dot", "p", "c_id",
+    "wx", "wy", "wz", "sigma_gps", "n_nbr",
+    "d_min", "t_cpa", "f_avoid",
+]
+LEAKAGE_FREE_UAV_FEATURES: List[str] = LEGACY_UAV_FEATURES[:20]
+LEAKING_FEATURES = ("d_min", "t_cpa", "f_avoid")
+LEAKING_RELATIONS = ("conflicts_with",)
+
+
+def relation_vocab(leakage_free: bool = True) -> Dict[str, int]:
+    return dict(LEAKAGE_FREE_RELATION_VOCAB if leakage_free else LEGACY_RELATION_VOCAB)
+
+
+def uav_feature_names(leakage_free: bool = True) -> List[str]:
+    return list(LEAKAGE_FREE_UAV_FEATURES if leakage_free else LEGACY_UAV_FEATURES)
+
 
 @dataclass
 class AirspaceState:
-    """Raw airspace state at a single epoch."""
+    """Raw (observed) airspace state at a single epoch."""
 
     uav_positions: np.ndarray       # (N_uav, 3) xyz in meters
     uav_velocities: np.ndarray      # (N_uav, 3)
@@ -75,6 +108,10 @@ class TKGSnapshot:
 
     conflict_pairs: Optional[torch.Tensor] = None
     conflict_labels: Optional[torch.Tensor] = None
+    conflict_ttc: Optional[torch.Tensor] = None        # (P,) seconds; -1 for negatives
+    uav_aoi: Optional[torch.Tensor] = None             # (N_uav,) age of information (s)
+    relation_names: Optional[List[str]] = None
+    feature_names: Optional[List[str]] = None
 
 
 class TKGBuilder:
@@ -87,19 +124,32 @@ class TKGBuilder:
         approach_lookahead: float = 60.0,
         corridor_lookahead: float = 120.0,
         weather_radius: float = 400.0,
-        feature_dim: int = 23,
+        feature_dim: Optional[int] = None,
+        leakage_free: bool = True,
     ):
         self.approach_cpa_h = approach_cpa_h
         self.approach_cpa_v = approach_cpa_v
         self.approach_lookahead = approach_lookahead
         self.corridor_lookahead = corridor_lookahead
         self.weather_radius = weather_radius
-        self.feature_dim = feature_dim
+        self.leakage_free = leakage_free
 
-        self._last_edge_times: Dict[int, Dict[Tuple[int, int], float]] = {
-            r: {} for r in range(6)
+        self.relations = relation_vocab(leakage_free)
+        self.relation_names = sorted(self.relations, key=self.relations.get)
+        self.num_relations = len(self.relations)
+        self.uav_features = uav_feature_names(leakage_free)
+        self.feature_dim = feature_dim if feature_dim is not None else len(self.uav_features)
+        if self.feature_dim < len(self.uav_features):
+            raise ValueError(
+                f"feature_dim={self.feature_dim} smaller than UAV feature set "
+                f"({len(self.uav_features)})"
+            )
+
+        self._last_edge_times: Dict[str, Dict[Tuple[int, int], float]] = {
+            r: {} for r in self.relations
         }
 
+    # ------------------------------------------------------------------ #
     def build(
         self, state: AirspaceState, device: torch.device = torch.device("cpu")
     ) -> TKGSnapshot:
@@ -116,12 +166,12 @@ class TKGBuilder:
         edge_indices, edge_deltas = self._build_edges(state, n_uav, n_sec, n_wx, n_rz)
 
         ei_tensors = {
-            r: torch.tensor(edges, dtype=torch.long, device=device)
+            self.relations[r]: torch.tensor(edges, dtype=torch.long, device=device)
             for r, edges in edge_indices.items()
             if len(edges[0]) > 0
         }
         ed_tensors = {
-            r: torch.tensor(deltas, dtype=torch.float32, device=device)
+            self.relations[r]: torch.tensor(deltas, dtype=torch.float32, device=device)
             for r, deltas in edge_deltas.items()
             if len(deltas) > 0
         }
@@ -133,8 +183,11 @@ class TKGBuilder:
             edge_deltas=ed_tensors,
             num_uavs=n_uav,
             num_nodes=n_total,
+            relation_names=list(self.relation_names),
+            feature_names=list(self.uav_features),
         )
 
+    # ------------------------------------------------------------------ #
     def _build_node_features(
         self,
         state: AirspaceState,
@@ -144,10 +197,7 @@ class TKGBuilder:
         n_wx: int,
         n_rz: int,
     ) -> np.ndarray:
-        """Build the 23-dim UAV feature vector per Eq. (1) in the paper:
-        [x,y,z, vx,vy,vz, ψ,ψ̇, ax,ay,az, b,ḃ, p, c_id,
-         wx,wy,wz, σ_gps, n_nbr, d_min, t_cpa, f_avoid]
-        """
+        """UAV feature vector (see module docstring for the two feature sets)."""
         feat = np.zeros((n_total, self.feature_dim), dtype=np.float32)
 
         heading_rates = state.uav_heading_rates if state.uav_heading_rates is not None else np.zeros(n_uav, dtype=np.float32)
@@ -157,38 +207,34 @@ class TKGBuilder:
         local_wind = state.uav_local_wind if state.uav_local_wind is not None else np.zeros((n_uav, 3), dtype=np.float32)
         gps_dop = state.uav_gps_dop if state.uav_gps_dop is not None else np.full(n_uav, 2.5, dtype=np.float32)
 
-        for i in range(n_uav):
-            feat[i, 0:3] = state.uav_positions[i]                # x, y, z
-            feat[i, 3:6] = state.uav_velocities[i]               # vx, vy, vz
-            feat[i, 6] = state.uav_headings[i]                   # ψ
-            feat[i, 7] = heading_rates[i]                         # ψ̇
-            feat[i, 8:11] = accelerations[i]                      # ax, ay, az
-            feat[i, 11] = state.uav_battery[i]                   # b
-            feat[i, 12] = battery_rates[i]                        # ḃ
-            feat[i, 13] = state.uav_priority[i]                  # p
-            feat[i, 14] = corridor_ids[i]                         # c_id
-            feat[i, 15:18] = local_wind[i]                        # wx, wy, wz
-            feat[i, 18] = gps_dop[i]                              # σ_gps
-
         if n_uav > 0:
+            feat[:n_uav, 0:3] = state.uav_positions[:n_uav]          # x, y, z
+            feat[:n_uav, 3:6] = state.uav_velocities[:n_uav]         # vx, vy, vz
+            feat[:n_uav, 6] = state.uav_headings[:n_uav]             # ψ
+            feat[:n_uav, 7] = heading_rates[:n_uav]                  # ψ̇
+            feat[:n_uav, 8:11] = accelerations[:n_uav]               # ax, ay, az
+            feat[:n_uav, 11] = state.uav_battery[:n_uav]             # b
+            feat[:n_uav, 12] = battery_rates[:n_uav]                 # ḃ
+            feat[:n_uav, 13] = state.uav_priority[:n_uav]            # p
+            feat[:n_uav, 14] = corridor_ids[:n_uav]                  # c_id
+            feat[:n_uav, 15:18] = local_wind[:n_uav]                 # wx, wy, wz
+            feat[:n_uav, 18] = gps_dop[:n_uav]                       # σ_gps
+
             positions = state.uav_positions[:n_uav]
-            for i in range(n_uav):
-                diffs = positions - positions[i]
-                dists = np.sqrt((diffs[:, 0] ** 2) + (diffs[:, 1] ** 2) + 1e-12)
-                dists[i] = np.inf
-                nbr_count = np.sum(dists < self.approach_cpa_h)
-                feat[i, 19] = nbr_count                          # n_nbr
-                nearest = np.argmin(dists)
-                feat[i, 20] = dists[nearest]                      # d_min
-                dp = diffs[nearest]
-                dv = state.uav_velocities[nearest] - state.uav_velocities[i]
-                dvdv = np.dot(dv, dv)
-                if dvdv > 1e-8:
-                    t_cpa = max(0.0, -np.dot(dp, dv) / dvdv)
-                else:
-                    t_cpa = 0.0
-                feat[i, 21] = t_cpa                               # t_cpa
-            feat[:n_uav, 22] = state.uav_avoiding.astype(np.float32)  # f_avoid
+            diffs = positions[None, :, :] - positions[:, None, :]    # (N, N, 3)
+            dists = np.sqrt(diffs[..., 0] ** 2 + diffs[..., 1] ** 2 + 1e-12)
+            np.fill_diagonal(dists, np.inf)
+            feat[:n_uav, 19] = (dists < self.approach_cpa_h).sum(axis=1)   # n_nbr
+
+            if not self.leakage_free:
+                nearest = np.argmin(dists, axis=1)
+                feat[:n_uav, 20] = dists[np.arange(n_uav), nearest]      # d_min
+                dp = diffs[np.arange(n_uav), nearest]                     # (N, 3)
+                dv = state.uav_velocities[nearest] - state.uav_velocities[:n_uav]
+                dvdv = (dv * dv).sum(axis=1)
+                t_cpa = np.where(dvdv > 1e-8, -(dp * dv).sum(axis=1) / np.maximum(dvdv, 1e-8), 0.0)
+                feat[:n_uav, 21] = np.maximum(t_cpa, 0.0)                 # t_cpa
+                feat[:n_uav, 22] = state.uav_avoiding[:n_uav].astype(np.float32)  # f_avoid
 
         offset = n_uav
         for i in range(n_sec):
@@ -221,6 +267,7 @@ class TKGBuilder:
         ])
         return types
 
+    # ------------------------------------------------------------------ #
     def _build_edges(
         self,
         state: AirspaceState,
@@ -228,9 +275,9 @@ class TKGBuilder:
         n_sec: int,
         n_wx: int,
         n_rz: int,
-    ) -> Tuple[Dict[int, Tuple[List, List]], Dict[int, List]]:
-        edge_indices: Dict[int, Tuple[List, List]] = {r: ([], []) for r in range(6)}
-        edge_deltas: Dict[int, List] = {r: [] for r in range(6)}
+    ) -> Tuple[Dict[str, Tuple[List, List]], Dict[str, List]]:
+        edge_indices: Dict[str, Tuple[List, List]] = {r: ([], []) for r in self.relations}
+        edge_deltas: Dict[str, List] = {r: [] for r in self.relations}
         t = state.epoch_time
 
         self._add_approach_edges(state, n_uav, t, edge_indices, edge_deltas)
@@ -240,9 +287,14 @@ class TKGBuilder:
 
         return edge_indices, edge_deltas
 
+    def _edge_delta(self, relation: str, key: Tuple[int, int], t: float) -> float:
+        delta = t - self._last_edge_times[relation].get(key, t)
+        self._last_edge_times[relation][key] = t
+        return delta
+
     def _add_approach_edges(self, state, n_uav, t, edge_indices, edge_deltas):
-        r_approach = RELATION_VOCAB["approaches"]
-        r_conflict = RELATION_VOCAB["conflicts_with"]
+        r_approach = "approaches"
+        r_conflict = "conflicts_with" if not self.leakage_free else None
 
         for i in range(n_uav):
             for j in range(i + 1, n_uav):
@@ -263,24 +315,21 @@ class TKGBuilder:
                     cpa_h = np.sqrt(cpa_pos[0] ** 2 + cpa_pos[1] ** 2)
 
                 if cpa_h < self.approach_cpa_h and v_dist < self.approach_cpa_v:
-                    delta = t - self._last_edge_times[r_approach].get((i, j), t)
-                    self._last_edge_times[r_approach][(i, j)] = t
-
+                    delta = self._edge_delta(r_approach, (i, j), t)
                     for src, dst in [(i, j), (j, i)]:
                         edge_indices[r_approach][0].append(src)
                         edge_indices[r_approach][1].append(dst)
                         edge_deltas[r_approach].append(delta)
 
-                    if cpa_h < self.approach_cpa_h * 0.3:
-                        delta_c = t - self._last_edge_times[r_conflict].get((i, j), t)
-                        self._last_edge_times[r_conflict][(i, j)] = t
+                    if r_conflict is not None and cpa_h < self.approach_cpa_h * 0.3:
+                        delta_c = self._edge_delta(r_conflict, (i, j), t)
                         for src, dst in [(i, j), (j, i)]:
                             edge_indices[r_conflict][0].append(src)
                             edge_indices[r_conflict][1].append(dst)
                             edge_deltas[r_conflict].append(delta_c)
 
     def _add_corridor_edges(self, state, n_uav, t, edge_indices, edge_deltas):
-        r = RELATION_VOCAB["shares_corridor"]
+        r = "shares_corridor"
         corridor_map: Dict[int, List[int]] = {}
 
         for uav_a, uav_b, start_t, end_t in state.corridor_reservations:
@@ -297,15 +346,14 @@ class TKGBuilder:
             for a in range(len(uavs)):
                 for b in range(a + 1, len(uavs)):
                     i, j = uavs[a], uavs[b]
-                    delta = t - self._last_edge_times[r].get((i, j), t)
-                    self._last_edge_times[r][(i, j)] = t
+                    delta = self._edge_delta(r, (i, j), t)
                     for src, dst in [(i, j), (j, i)]:
                         edge_indices[r][0].append(src)
                         edge_indices[r][1].append(dst)
                         edge_deltas[r].append(delta)
 
     def _add_weather_edges(self, state, n_uav, n_sec, n_wx, t, edge_indices, edge_deltas):
-        r_wind = RELATION_VOCAB["is_downwind_of"]
+        r_wind = "is_downwind_of"
         wx_offset = n_uav + n_sec
 
         if n_wx == 0:
@@ -320,14 +368,13 @@ class TKGBuilder:
                 d = np.linalg.norm(state.uav_positions[i, :2] - wx_positions[w, :2])
                 if d < self.weather_radius:
                     wx_node = wx_offset + w
-                    delta = t - self._last_edge_times[r_wind].get((i, wx_node), t)
-                    self._last_edge_times[r_wind][(i, wx_node)] = t
+                    delta = self._edge_delta(r_wind, (i, wx_node), t)
                     edge_indices[r_wind][0].append(wx_node)
                     edge_indices[r_wind][1].append(i)
                     edge_deltas[r_wind].append(delta)
 
     def _add_restriction_edges(self, state, n_uav, n_sec, n_wx, n_rz, t, edge_indices, edge_deltas):
-        r = RELATION_VOCAB["is_restricted_by"]
+        r = "is_restricted_by"
         rz_offset = n_uav + n_sec + n_wx
 
         for i in range(n_uav):
@@ -337,12 +384,11 @@ class TKGBuilder:
                 d = np.linalg.norm(state.uav_positions[i, :2] - rz_center[:2])
                 if d < rz_radius * 1.5:
                     rz_node = rz_offset + z
-                    delta = t - self._last_edge_times[r].get((i, rz_node), t)
-                    self._last_edge_times[r][(i, rz_node)] = t
+                    delta = self._edge_delta(r, (i, rz_node), t)
                     edge_indices[r][0].append(rz_node)
                     edge_indices[r][1].append(i)
                     edge_deltas[r].append(delta)
 
     def reset(self):
         """Clear cached edge timestamps between scenarios."""
-        self._last_edge_times = {r: {} for r in range(6)}
+        self._last_edge_times = {r: {} for r in self.relations}

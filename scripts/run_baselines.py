@@ -104,12 +104,13 @@ def main():
     logger.info(f"Device: {device}, UAVs: {cfg.data.num_uavs}")
 
     logger.info("Generating data...")
-    sim = UrbanAir500(num_uavs=cfg.data.num_uavs, seed=42)
+    sim = cfg.make_simulator(seed=42)
+    builder = cfg.make_builder()
     n_sc = 3 if args.quick else 10
     dur = 10.0 if args.quick else 60.0
 
-    train_data = sim.generate_dataset("train", n_sc, dur, device)
-    test_data = sim.generate_dataset("test", max(n_sc // 2, 1), dur, device)
+    train_data = sim.generate_dataset("train", n_sc, dur, device, builder=builder)
+    test_data = sim.generate_dataset("test", max(n_sc // 2, 1), dur, device, builder=builder)
 
     logger.info(f"Train: {len(train_data)}, Test: {len(test_data)}")
 
@@ -125,7 +126,7 @@ def main():
 
     # 2. LSTM-Pair
     logger.info("\n--- LSTM-Pair ---")
-    lstm = LSTMPair(input_dim=cfg.data.uav_feature_dim).to(device)
+    lstm = LSTMPair(input_dim=cfg.uav_feature_dim()).to(device)
     logger.info(f"  Parameters: {lstm.count_parameters():,}")
     train_baseline(lstm, train_data, test_data, cfg, device, epochs)
     result = evaluate_model(lstm, test_data, cfg, device)
@@ -134,7 +135,7 @@ def main():
 
     # 3. Transformer-Pair
     logger.info("\n--- Transformer-Pair ---")
-    tfm = TransformerPair(input_dim=cfg.data.uav_feature_dim).to(device)
+    tfm = TransformerPair(input_dim=cfg.uav_feature_dim()).to(device)
     logger.info(f"  Parameters: {tfm.count_parameters():,}")
     train_baseline(tfm, train_data, test_data, cfg, device, epochs)
     result = evaluate_model(tfm, test_data, cfg, device)
@@ -143,7 +144,7 @@ def main():
 
     # 4. STGCN
     logger.info("\n--- STGCN ---")
-    stgcn = STGCN(input_dim=cfg.data.uav_feature_dim).to(device)
+    stgcn = STGCN(input_dim=cfg.uav_feature_dim()).to(device)
     logger.info(f"  Parameters: {stgcn.count_parameters():,}")
     train_baseline(stgcn, train_data, test_data, cfg, device, epochs)
     result = evaluate_model(stgcn, test_data, cfg, device)
@@ -152,7 +153,7 @@ def main():
 
     # 5. GAT-Static
     logger.info("\n--- GAT-Static ---")
-    gat = GATStatic(input_dim=cfg.data.uav_feature_dim).to(device)
+    gat = GATStatic(input_dim=cfg.uav_feature_dim()).to(device)
     logger.info(f"  Parameters: {gat.count_parameters():,}")
     train_baseline(gat, train_data, test_data, cfg, device, epochs)
     result = evaluate_model(gat, test_data, cfg, device)

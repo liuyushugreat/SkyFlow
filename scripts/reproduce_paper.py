@@ -85,10 +85,11 @@ def main():
 
     # ── Step 1: Generate Data ──
     logger.info("\n[Step 1/7] Generating UrbanAir-500 benchmark data...")
-    sim = UrbanAir500(num_uavs=cfg.data.num_uavs, seed=cfg.training.seed)
-    train_data = sim.generate_dataset("train", n_train_scenarios, scenario_duration, device)
-    val_data = sim.generate_dataset("val", n_val_scenarios, scenario_duration, device)
-    test_data = sim.generate_dataset("test", n_test_scenarios, scenario_duration, device)
+    sim = cfg.make_simulator()
+    builder = cfg.make_builder()
+    train_data = sim.generate_dataset("train", n_train_scenarios, scenario_duration, device, builder=builder)
+    val_data = sim.generate_dataset("val", n_val_scenarios, scenario_duration, device, builder=builder)
+    test_data = sim.generate_dataset("test", n_test_scenarios, scenario_duration, device, builder=builder)
     logger.info(f"  Train: {len(train_data)} snapshots | Val: {len(val_data)} | Test: {len(test_data)}")
 
     all_results = {}
@@ -161,10 +162,10 @@ def main():
         logger.info(f"    CDR={vo_metrics['cdr']:.4f}")
 
         baseline_models = [
-            ("LSTM-P", LSTMPair(input_dim=cfg.data.uav_feature_dim)),
-            ("Tfm-P", TransformerPair(input_dim=cfg.data.uav_feature_dim)),
-            ("STGCN", STGCN(input_dim=cfg.data.uav_feature_dim)),
-            ("GAT-S", GATStatic(input_dim=cfg.data.uav_feature_dim)),
+            ("LSTM-P", LSTMPair(input_dim=cfg.uav_feature_dim())),
+            ("Tfm-P", TransformerPair(input_dim=cfg.uav_feature_dim())),
+            ("STGCN", STGCN(input_dim=cfg.uav_feature_dim())),
+            ("GAT-S", GATStatic(input_dim=cfg.uav_feature_dim())),
         ]
 
         for bl_name, bl_model in baseline_models:
@@ -174,7 +175,7 @@ def main():
             for si, seed in enumerate(seeds):
                 torch.manual_seed(seed)
                 np.random.seed(seed)
-                bl_instance = type(bl_model)(input_dim=cfg.data.uav_feature_dim).to(device)
+                bl_instance = type(bl_model)(input_dim=cfg.uav_feature_dim()).to(device)
                 _train_simple(bl_instance, train_data, cfg, device, baseline_epochs)
                 m = _eval_nn(bl_instance, test_data, cfg, device)
                 bl_seed_cdrs.append(m["cdr"])
@@ -201,8 +202,8 @@ def main():
         scalability = {}
         for n_uav in fleet_sizes:
             logger.info(f"  Fleet size: {n_uav}")
-            scale_sim = UrbanAir500(num_uavs=n_uav, seed=cfg.training.seed)
-            builder = TKGBuilder()
+            scale_sim = cfg.make_simulator(num_uavs=n_uav)
+            builder = cfg.make_builder()
             graph_lats, fwd_lats, total_lats = [], [], []
 
             plans = scale_sim.generate_flight_plans(n_uav)
