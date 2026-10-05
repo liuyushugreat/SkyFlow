@@ -12,3 +12,5 @@ build/
 # local planning doc (contains personal info)
 docs/SKYFLOW_PLAN.md
 results/_smoke/
+results/_dryrun/
+logs/

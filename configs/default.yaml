@@ -86,9 +86,10 @@ training:
   seeds: [42, 123, 456, 789, 1024]
   device: auto
   early_stopping_patience: 15
-  min_epochs: 5
+  min_epochs: 30            # S8: F1 stays 0 for the first epochs at 0.16% positives; do not stop before 30
   eval_every: 1
   batch_windows: 4          # windows per optimizer step (OOM -> halve micro-batch, accumulate)
+  micro_batch_windows: 1    # windows per backward; 1 keeps ~8 GB instead of ~19 GB on N=500, same maths
   amp: false
   tf32: true
   regime_ttc_boundary_s: 15.0   # hard: ttc <= 15 s, easy: ttc > 15 s

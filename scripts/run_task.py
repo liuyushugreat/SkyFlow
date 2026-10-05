@@ -23,6 +23,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import os
+# Reduce allocator fragmentation (reserved 12 GB -> 8 GB on N=500) so that two
+# tasks fit on one 24 GB GPU; must be set before CUDA initialises.  Override
+# by exporting PYTORCH_CUDA_ALLOC_CONF yourself.
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
 import numpy as np
 import torch
 

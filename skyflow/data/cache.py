@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import platform
 import subprocess
 import time
@@ -60,8 +61,14 @@ def cache_key(cfg: SkyFlowConfig, split: str) -> str:
     return hashlib.sha1(blob).hexdigest()[:16]
 
 
+def resolve_cache_dir(cfg: SkyFlowConfig, cache_dir: Optional[str] = None) -> Path:
+    """Explicit argument > SKYFLOW_CACHE_DIR environment variable > config.
+    The env var lets the (multi-GB) cache live outside a synced workspace."""
+    return Path(cache_dir or os.environ.get("SKYFLOW_CACHE_DIR") or cfg.data.cache_dir)
+
+
 def cache_paths(cfg: SkyFlowConfig, split: str, cache_dir: Optional[str] = None) -> Tuple[Path, Path]:
-    root = Path(cache_dir or cfg.data.cache_dir) / cache_key(cfg, split)
+    root = resolve_cache_dir(cfg, cache_dir) / cache_key(cfg, split)
     return root / f"{split}.pt", root / f"{split}.meta.json"
 
 

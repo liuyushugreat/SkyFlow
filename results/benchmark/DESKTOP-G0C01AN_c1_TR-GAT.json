@@ -1,0 +1,64 @@
+{
+  "method": "TR-GAT",
+  "config": "configs/default.yaml",
+  "epochs_measured": 1,
+  "data": {
+    "train_snapshots": 2400,
+    "val_snapshots": 600,
+    "train_pairs": 170512068,
+    "train_positives": 273457,
+    "num_uavs": 500,
+    "grid_size_m": 5000.0,
+    "train_scenarios": 40,
+    "scenario_duration_s": 60.0,
+    "cached_before_run": {
+      "train": true,
+      "val": true
+    },
+    "train_data_seconds": 9.641504900002474,
+    "val_data_seconds": 2.026295800002117
+  },
+  "timing": {
+    "data_seconds": 11.667800700004591,
+    "train_seconds_total": 345.8210321999977,
+    "seconds_per_epoch_total": 345.8210321999977,
+    "seconds_per_epoch_train_pass": 334.965489000002,
+    "seconds_per_epoch_validation": 10.855543199995736,
+    "data_share_of_total": 0.03263822426382851
+  },
+  "gpu": {
+    "peak_memory_allocated_gb": 18.9578496,
+    "peak_memory_reserved_gb": 27.023900672,
+    "util_mean_pct": 30.713414634146343,
+    "util_p95_pct": 100.0,
+    "util_samples": 328,
+    "smi_mem_used_max_mb": 24128.0
+  },
+  "training": {
+    "num_parameters": 1145116,
+    "micro_batch_final": 4,
+    "oom_adjustments": [],
+    "batch_windows": 4,
+    "observation_window": 10,
+    "amp": false,
+    "tf32": true,
+    "val_f1_after": 0.0
+  },
+  "env": {
+    "hostname": "DESKTOP-G0C01AN",
+    "os": "Windows 11",
+    "python": "3.14.3",
+    "torch": "2.14.0+cu130",
+    "cuda": "13.0",
+    "cudnn": 92400,
+    "device": "cuda",
+    "cpu_model": "Intel(R) Core(TM) i9-14900K",
+    "gpu_model": "NVIDIA GeForce RTX 4090",
+    "gpu_memory_gb": 25.8,
+    "driver": "591.86",
+    "tf32_matmul": true,
+    "tf32_cudnn": true,
+    "git_commit": "7741ba9d7c503b1782d2bdd25ee8fa6159a094e3"
+  },
+  "created": "2026-10-05 17:59:44"
+}

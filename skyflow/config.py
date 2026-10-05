@@ -141,11 +141,12 @@ class TrainingConfig:
     device: str = "auto"
     # S7a: early stopping on validation F1 (same rule for every method)
     early_stopping_patience: int = 15
-    min_epochs: int = 5
+    min_epochs: int = 30            # S8: val F1 stays 0 for the first epochs (0.16 % positives)
     eval_every: int = 1
     # S7a: observation windows per optimizer step; OOM halves micro-batch and
     # accumulates gradients to keep this effective batch
     batch_windows: int = 4
+    micro_batch_windows: int = 1    # windows per backward (grad accumulation up to batch_windows); memory knob only
     # S7a: numerics
     amp: bool = False
     tf32: bool = True

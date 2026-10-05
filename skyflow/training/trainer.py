@@ -23,6 +23,7 @@ from skyflow.models.conflict_head import (
     build_pair_edge_features,
 )
 from skyflow.data.tkg_builder import TKGSnapshot
+from skyflow.training.io_utils import save_with_retry
 from skyflow.training.losses import FocalLoss, build_loss
 from skyflow.training.metrics import ConflictMetrics, LatencyTimer, MetricResult
 
@@ -64,7 +65,10 @@ class SkyFlowTrainer:
         self.head: Optional[ConflictScoringHead] = None
         # S7a bookkeeping
         tc = cfg.training
-        self.micro_batch = max(int(getattr(tc, "batch_windows", 1)), 1)
+        # windows whose graphs are kept alive per backward; gradients are
+        # accumulated to the full batch_windows, so the maths is unchanged
+        self.micro_batch = max(min(int(getattr(tc, "micro_batch_windows", 1)),
+                                   int(getattr(tc, "batch_windows", 1))), 1)
         self.oom_adjustments: List[Dict] = []
         self.history: List[Dict] = []
         if self.device.type == "cuda":
@@ -166,7 +170,7 @@ class SkyFlowTrainer:
         self.oom_adjustments = []
 
         def _save_checkpoint(metrics_dict, epoch):
-            torch.save({
+            save_with_retry({
                 "model": self.model.state_dict(),
                 "head": self.head.state_dict(),
                 "epoch": epoch,
@@ -284,7 +288,9 @@ class SkyFlowTrainer:
                     stale += 1
             self.history.append(record)
 
-            if patience > 0 and epochs_run >= min_epochs and stale >= patience:
+            # never stop while val F1 has not left zero: with 0.16 % positives
+            # the thresholded F1 is 0 for the first epochs although the loss falls
+            if patience > 0 and epochs_run >= min_epochs and stale >= patience and best_f1 > 0:
                 logger.info(f"Early stopping at epoch {epochs_run} (best F1 {best_f1:.4f} @ {best_epoch})")
                 break
 

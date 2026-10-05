@@ -14,7 +14,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from skyflow.config import SkyFlowConfig
-from skyflow.data.cache import cache_paths, cache_size_bytes, get_split
+from skyflow.data.cache import cache_paths, cache_size_bytes, get_split, resolve_cache_dir
 
 
 def main():
@@ -26,7 +26,8 @@ def main():
     args = ap.parse_args()
 
     cfg = SkyFlowConfig.from_yaml(args.config)
-    cache_dir = args.cache_dir or cfg.data.cache_dir
+    cache_dir = str(resolve_cache_dir(cfg, args.cache_dir))
+    print(f"cache dir: {Path(cache_dir).resolve()}")
     t0 = time.perf_counter()
     for split in args.splits:
         pt, meta = cache_paths(cfg, split, cache_dir)

@@ -14,6 +14,7 @@ import torch.nn as nn
 
 from skyflow.config import SkyFlowConfig
 from skyflow.data.tkg_builder import TKGSnapshot
+from skyflow.training.io_utils import save_with_retry
 from skyflow.training.losses import build_loss
 from skyflow.training.metrics import ConflictMetrics, LatencyTimer, MetricResult
 
@@ -87,22 +88,24 @@ def train_baseline(model: nn.Module, train_data, val_data, cfg: SkyFlowConfig, d
         total, n_steps = 0.0, 0
         for s in range(0, len(idx), batch):
             optimizer.zero_grad(set_to_none=True)
-            loss = 0.0
-            valid = 0
-            for k in idx[s:s + batch]:
-                snapshot, labels = train_data[k]
+            chunk = [train_data[k] for k in idx[s:s + batch]]
+            # backward per snapshot (gradient accumulation): same effective
+            # batch, but only one snapshot's graph is alive at a time
+            total_loss, valid = 0.0, 0
+            for snapshot, labels in chunk:
                 snapshot = _to_device(snapshot, device)
                 preds = model(snapshot)
                 if preds.numel() == 0:
                     continue
-                loss = loss + criterion(preds, labels.to(device))
+                loss = criterion(preds, labels.to(device)) / len(chunk)
+                loss.backward()
+                total_loss += float(loss.detach()) * len(chunk)
                 valid += 1
             if valid == 0:
                 continue
-            (loss / valid).backward()
             nn.utils.clip_grad_norm_(model.parameters(), tc.gradient_clip_norm)
             optimizer.step()
-            total += float(loss.detach()) / valid
+            total += total_loss / valid
             n_steps += 1
         epochs_run = epoch + 1
         val = evaluate_baseline(model, val_data, cfg, device, deterministic=False)
@@ -115,14 +118,14 @@ def train_baseline(model: nn.Module, train_data, val_data, cfg: SkyFlowConfig, d
             best_f1, best_epoch, stale = val.f1, epochs_run, 0
             best = {"cdr": val.cdr, "far": val.far, "f1": val.f1, "precision": val.precision,
                     "epoch": epochs_run, "seed": seed, "per_regime": val.per_regime}
-            torch.save({"model": model.state_dict(), "epoch": epochs_run, "metrics": best, "config": cfg}, ckpt)
+            save_with_retry({"model": model.state_dict(), "epoch": epochs_run, "metrics": best, "config": cfg}, ckpt)
         else:
             stale += 1
-        if patience > 0 and epochs_run >= min_epochs and stale >= patience:
+        if patience > 0 and epochs_run >= min_epochs and stale >= patience and best_f1 > 0:   # same rule as TR-GAT
             logger.info(f"Early stopping at epoch {epochs_run} (best F1 {best_f1:.4f} @ {best_epoch})")
             break
     if not ckpt.exists():
-        torch.save({"model": model.state_dict(), "epoch": epochs_run, "metrics": {}, "config": cfg}, ckpt)
+        save_with_retry({"model": model.state_dict(), "epoch": epochs_run, "metrics": {}, "config": cfg}, ckpt)
     best.update({"epochs_run": epochs_run, "best_epoch": best_epoch,
                  "train_seconds": time.perf_counter() - t0, "early_stopped": epochs_run < n_epochs,
                  "checkpoint": str(ckpt), "history": history})
