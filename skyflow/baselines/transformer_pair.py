@@ -14,6 +14,7 @@ import torch
 import torch.nn as nn
 
 from skyflow.data.tkg_builder import TKGSnapshot
+from skyflow.models.input_norm import InputStandardizer
 
 
 class TransformerPair(nn.Module):
@@ -28,6 +29,7 @@ class TransformerPair(nn.Module):
         dropout: float = 0.1,
     ):
         super().__init__()
+        self.input_norm = InputStandardizer(input_dim)
         self.input_proj = nn.Linear(input_dim, embed_dim)
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=embed_dim,
@@ -59,7 +61,7 @@ class TransformerPair(nn.Module):
         if history is None:
             history = feats.unsqueeze(1)
 
-        x = self.input_proj(history)
+        x = self.input_proj(self.input_norm(history))
         encoded = self.encoder(x)
         embeddings = encoded[:, -1, :]
 

@@ -17,6 +17,7 @@ from skyflow.data.tkg_builder import TKGSnapshot
 from skyflow.training.io_utils import save_with_retry
 from skyflow.training.losses import build_loss
 from skyflow.training.metrics import ConflictMetrics, LatencyTimer, MetricResult
+from skyflow.training.trainer import selection_score
 
 logger = logging.getLogger(__name__)
 
@@ -34,9 +35,14 @@ def _to_device(snapshot: TKGSnapshot, device: torch.device) -> TKGSnapshot:
 
 @torch.no_grad()
 def evaluate_baseline(model, data: List[Tuple[TKGSnapshot, torch.Tensor]], cfg: SkyFlowConfig,
-                      device: torch.device, deterministic: bool) -> MetricResult:
+                      device: torch.device, deterministic: bool, threshold: Optional[float] = None) -> MetricResult:
+    """Threshold: explicit > ``model.threshold`` (val-selected, stored by
+    train_baseline / restored by the loader) > config fixed threshold.
+    Deterministic rules output {0,1}, so the threshold is irrelevant for them."""
     tc = cfg.training
-    metrics = ConflictMetrics(threshold=tc.conflict_threshold,
+    thr = threshold if threshold is not None else getattr(model, "threshold", None)
+    thr = float(thr) if thr is not None else float(tc.conflict_threshold)
+    metrics = ConflictMetrics(threshold=thr,
                               regime_ttc_boundary_s=getattr(tc, "regime_ttc_boundary_s", 15.0))
     if not deterministic:
         model.eval()
@@ -76,6 +82,9 @@ def train_baseline(model: nn.Module, train_data, val_data, cfg: SkyFlowConfig, d
     output_dir.mkdir(parents=True, exist_ok=True)
     ckpt = output_dir / "best_model.pt"
 
+    threshold_mode = str(getattr(tc, "threshold_mode", "val"))
+    fixed_threshold = float(tc.conflict_threshold)
+    model.threshold = fixed_threshold
     best_f1, best_epoch, best, stale = -1.0, 0, {}, 0
     history = []
     t0 = time.perf_counter()
@@ -108,24 +117,33 @@ def train_baseline(model: nn.Module, train_data, val_data, cfg: SkyFlowConfig, d
             total += total_loss / valid
             n_steps += 1
         epochs_run = epoch + 1
-        val = evaluate_baseline(model, val_data, cfg, device, deterministic=False)
+        val = evaluate_baseline(model, val_data, cfg, device, deterministic=False, threshold=fixed_threshold)
+        score, sel = selection_score(val, threshold_mode)
         rec = {"epoch": epochs_run, "train_loss": total / max(n_steps, 1), "val_f1": val.f1,
-               "val_cdr": val.cdr, "val_far": val.far, "epoch_seconds": time.perf_counter() - t_ep}
+               "val_cdr": val.cdr, "val_far": val.far, "val_auprc": val.auprc, "val_best_f1": val.best_f1,
+               "val_best_threshold": val.best_threshold, "val_selection": score,
+               "epoch_seconds": time.perf_counter() - t_ep}
         history.append(rec)
         logger.info(f"Epoch {epochs_run}/{n_epochs} | Loss: {rec['train_loss']:.4f} | "
-                    f"Val CDR: {val.cdr:.4f} | Val F1: {val.f1:.4f} | Val FAR: {val.far:.4f}")
-        if val.f1 > best_f1:
-            best_f1, best_epoch, stale = val.f1, epochs_run, 0
-            best = {"cdr": val.cdr, "far": val.far, "f1": val.f1, "precision": val.precision,
-                    "epoch": epochs_run, "seed": seed, "per_regime": val.per_regime}
-            save_with_retry({"model": model.state_dict(), "epoch": epochs_run, "metrics": best, "config": cfg}, ckpt)
+                    f"Val AUPRC: {val.auprc:.4f} | Val best-F1: {val.best_f1:.4f} @thr {val.best_threshold:.3f} "
+                    f"(CDR {val.best_cdr:.3f}, FAR {val.best_far:.3f}) | F1@{fixed_threshold:.2f}: {val.f1:.4f}")
+        if score > best_f1:
+            best_f1, best_epoch, stale = score, epochs_run, 0
+            model.threshold = float(sel["threshold"])
+            best = {"cdr": sel["cdr"], "far": sel["far"], "f1": sel["f1"], "precision": 1.0 - sel["far"],
+                    "epoch": epochs_run, "seed": seed, "per_regime": val.per_regime, "auprc": val.auprc,
+                    "threshold": model.threshold, "selection_metric": sel["metric"], "selection_score": score}
+            save_with_retry({"model": model.state_dict(), "epoch": epochs_run, "threshold": model.threshold,
+                             "metrics": best, "config": cfg}, ckpt)
         else:
             stale += 1
         if patience > 0 and epochs_run >= min_epochs and stale >= patience and best_f1 > 0:   # same rule as TR-GAT
-            logger.info(f"Early stopping at epoch {epochs_run} (best F1 {best_f1:.4f} @ {best_epoch})")
+            logger.info(f"Early stopping at epoch {epochs_run} (best {threshold_mode} score {best_f1:.4f} @ {best_epoch})")
             break
     if not ckpt.exists():
-        save_with_retry({"model": model.state_dict(), "epoch": epochs_run, "metrics": {}, "config": cfg}, ckpt)
+        model.threshold = fixed_threshold
+        save_with_retry({"model": model.state_dict(), "epoch": epochs_run, "threshold": fixed_threshold,
+                         "metrics": {}, "config": cfg}, ckpt)
     best.update({"epochs_run": epochs_run, "best_epoch": best_epoch,
                  "train_seconds": time.perf_counter() - t0, "early_stopped": epochs_run < n_epochs,
                  "checkpoint": str(ckpt), "history": history})

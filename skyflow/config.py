@@ -62,6 +62,7 @@ class FeaturesConfig:
     """Input feature pipeline switches (S2)."""
     leakage_free: bool = True       # drop d_min/t_cpa/f_avoid and conflicts_with
     input_set: str = "full"         # "full" | "telemetry_only" (S6)
+    normalize_inputs: bool = True   # S8: standardise node features with train-split mean/std (False = raw, legacy)
 
 
 @dataclass
@@ -142,6 +143,7 @@ class TrainingConfig:
     # S7a: early stopping on validation F1 (same rule for every method)
     early_stopping_patience: int = 15
     min_epochs: int = 30            # S8: val F1 stays 0 for the first epochs (0.16 % positives)
+    threshold_mode: str = "val"     # S8: "val" = select F1-optimal threshold on val, apply to test; "fixed" = conflict_threshold
     eval_every: int = 1
     # S7a: observation windows per optimizer step; OOM halves micro-batch and
     # accumulates gradients to keep this effective batch

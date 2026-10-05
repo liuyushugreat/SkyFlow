@@ -26,7 +26,8 @@ from skyflow.experiments.stats import bonferroni, paired_ttest
 LABELS = {"TR-GAT": "full", "TR-GAT-NT": "no temporal encoding", "abl_no_gating": "no relation gating",
           "abl_no_gru": "no GRU recurrence", "abl_bce": "BCE instead of focal", "abl_telemetry_only": "telemetry only"}
 FIELDS = ["method", "variant", "n_seeds", "seeds", "cdr_mean", "cdr_std", "far_mean", "far_std", "f1_mean", "f1_std",
-          "d_cdr", "d_far", "d_f1", "p_f1_bonf", "p_cdr_bonf", "p_far_bonf", "params", "epochs_run_mean", "git_commits"]
+          "d_cdr", "d_far", "d_f1", "p_f1_bonf", "p_cdr_bonf", "p_far_bonf", "auprc_mean", "threshold_mean",
+          "params", "epochs_run_mean", "git_commits"]
 
 
 def main():
@@ -57,7 +58,9 @@ def main():
         row = {"method": m, "variant": LABELS.get(m, METHODS[m].description), "n_seeds": len(seeds),
                "seeds": " ".join(map(str, seeds)), "params": by_seed[seeds[0]]["num_parameters"],
                "epochs_run_mean": np.mean([by_seed[s]["training"].get("epochs_run", 0) for s in seeds]),
-               "git_commits": " ".join(sorted({by_seed[s]["env"]["git_commit"][:8] for s in seeds}))}
+               "git_commits": " ".join(sorted({by_seed[s]["env"]["git_commit"][:8] for s in seeds})),
+               "auprc_mean": np.mean([by_seed[s]["test"].get("auprc", np.nan) for s in seeds]),
+               "threshold_mean": np.mean([by_seed[s]["test"].get("threshold", np.nan) for s in seeds])}
         for k in ("cdr", "far", "f1"):
             row[f"{k}_mean"] = v[k].mean()
             row[f"{k}_std"] = v[k].std(ddof=1) if len(seeds) > 1 else 0.0

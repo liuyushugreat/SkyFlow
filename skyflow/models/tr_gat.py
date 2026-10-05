@@ -28,6 +28,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from skyflow.models.input_norm import InputStandardizer
 from skyflow.models.temporal_encoding import SinusoidalTemporalEncoding
 
 RELATION_TYPES = [
@@ -195,6 +196,7 @@ class TRGAT(nn.Module):
         self.use_gating = use_gating
         self.use_gru = use_gru
 
+        self.input_norm = InputStandardizer(node_feature_dim)   # identity until fitted on train data
         self.input_proj = nn.Linear(node_feature_dim, embed_dim)
 
         self.layers = nn.ModuleList([
@@ -235,7 +237,7 @@ class TRGAT(nn.Module):
             node_emb: (N, embed_dim) final-layer embeddings.
             new_state: (N, recurrent_dim) updated recurrent summary.
         """
-        x = self.input_proj(node_features)
+        x = self.input_proj(self.input_norm(node_features))
 
         temporal_enc = {
             r: self.temporal_encoding(edge_deltas[r])

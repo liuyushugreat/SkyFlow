@@ -28,7 +28,7 @@ from skyflow.experiments.loader import list_tasks
 from skyflow.experiments.methods import MAIN_METHODS, METHODS
 from skyflow.experiments.stats import bonferroni, bootstrap_ci, group_snapshots, paired_ttest
 
-SCALARS = ("cdr", "far", "f1", "precision", "num_missed_positives")
+SCALARS = ("cdr", "far", "f1", "precision", "num_missed_positives", "auprc", "threshold")
 
 
 def load_runs(results_dir, eval_dir, methods):
@@ -99,9 +99,9 @@ def main():
             continue
         by_seed = runs[m]
         seeds = sorted(by_seed)
-        vals = {k: np.array([by_seed[s]["test"][k] for s in seeds], dtype=float) for k in SCALARS}
+        vals = {k: np.array([by_seed[s]["test"].get(k, np.nan) for s in seeds], dtype=float) for k in SCALARS}
         for k in SCALARS:
-            per_seed_metric[m][k] = {s: by_seed[s]["test"][k] for s in seeds}
+            per_seed_metric[m][k] = {s: by_seed[s]["test"].get(k, np.nan) for s in seeds}
         row = {"method": m, "kind": METHODS[m].kind, "n_seeds": len(seeds), "seeds": " ".join(map(str, seeds))}
         for k in SCALARS:
             row[f"{k}_mean"] = vals[k].mean()

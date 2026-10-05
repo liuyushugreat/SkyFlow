@@ -32,6 +32,20 @@ logger = logging.getLogger(__name__)
 _OOM_ERRORS = (torch.cuda.OutOfMemoryError,) if hasattr(torch.cuda, "OutOfMemoryError") else (RuntimeError,)
 
 
+def selection_score(m: MetricResult, threshold_mode: str) -> Tuple[float, Dict]:
+    """Model-selection score on the validation split.
+
+    'val'   : F1 at the F1-optimal validation threshold (threshold is then
+              frozen and applied to test) - default.
+    'fixed' : F1 at the fixed config threshold (legacy behaviour)."""
+    if threshold_mode == "fixed":
+        return float(m.f1), {"metric": "f1@fixed", "f1": m.f1, "cdr": m.cdr, "far": m.far, "threshold": m.threshold}
+    if threshold_mode != "val":
+        raise ValueError(f"threshold_mode must be 'val' or 'fixed', got {threshold_mode!r}")
+    return float(m.best_f1), {"metric": "best_f1@val", "f1": m.best_f1, "cdr": m.best_cdr, "far": m.best_far,
+                              "threshold": m.best_threshold}
+
+
 def _is_oom(err: BaseException) -> bool:
     return isinstance(err, _OOM_ERRORS) or "out of memory" in str(err).lower()
 
@@ -71,6 +85,7 @@ class SkyFlowTrainer:
                                    int(getattr(tc, "batch_windows", 1))), 1)
         self.oom_adjustments: List[Dict] = []
         self.history: List[Dict] = []
+        self.threshold: float = float(tc.conflict_threshold)   # replaced by the val-selected one after train()
         if self.device.type == "cuda":
             tf32 = bool(getattr(tc, "tf32", True))
             torch.backends.cuda.matmul.allow_tf32 = tf32
@@ -160,7 +175,10 @@ class SkyFlowTrainer:
         criterion = build_loss(getattr(tc, "loss", "focal"), tc.focal_gamma,
                                getattr(tc, "focal_alpha", 0.75))
 
-        best_f1 = -1.0
+        threshold_mode = str(getattr(tc, "threshold_mode", "val"))
+        fixed_threshold = float(tc.conflict_threshold)
+        self.threshold = fixed_threshold
+        best_f1 = -1.0          # best selection score (val best-F1 in 'val' mode, F1@fixed in 'fixed')
         best_metrics: Dict = {}
         best_epoch = 0
         output_dir = Path(output_dir) if output_dir is not None else Path(self.cfg.output_dir)
@@ -174,6 +192,7 @@ class SkyFlowTrainer:
                 "model": self.model.state_dict(),
                 "head": self.head.state_dict(),
                 "epoch": epoch,
+                "threshold": self.threshold,
                 "metrics": metrics_dict,
                 "config": self.cfg,
             }, ckpt_path)
@@ -266,37 +285,45 @@ class SkyFlowTrainer:
                       "lr": optimizer.param_groups[0]["lr"], "micro_batch": self.micro_batch}
 
             if epochs_run % eval_every == 0 or epochs_run == n_epochs:
-                val_metrics = self.evaluate(val_data)
+                val_metrics = self.evaluate(val_data, threshold=fixed_threshold)
+                score, sel = selection_score(val_metrics, threshold_mode)
                 record.update({"val_f1": val_metrics.f1, "val_cdr": val_metrics.cdr,
-                               "val_far": val_metrics.far, "val_precision": val_metrics.precision})
+                               "val_far": val_metrics.far, "val_precision": val_metrics.precision,
+                               "val_auprc": val_metrics.auprc, "val_best_f1": val_metrics.best_f1,
+                               "val_best_threshold": val_metrics.best_threshold, "val_selection": score})
                 logger.info(
                     f"Epoch {epochs_run}/{n_epochs} | Loss: {avg_loss:.4f} | "
-                    f"Val CDR: {val_metrics.cdr:.4f} | Val F1: {val_metrics.f1:.4f} | "
-                    f"Val FAR: {val_metrics.far:.4f} | {record['epoch_seconds']:.1f}s"
+                    f"Val AUPRC: {val_metrics.auprc:.4f} | Val best-F1: {val_metrics.best_f1:.4f} "
+                    f"@thr {val_metrics.best_threshold:.3f} (CDR {val_metrics.best_cdr:.3f}, FAR {val_metrics.best_far:.3f}) | "
+                    f"F1@{fixed_threshold:.2f}: {val_metrics.f1:.4f} | {record['epoch_seconds']:.1f}s"
                 )
-                if val_metrics.f1 > best_f1:
-                    best_f1 = val_metrics.f1
+                if score > best_f1:
+                    best_f1 = score
                     best_epoch = epochs_run
                     best_metrics = {
-                        "cdr": val_metrics.cdr, "far": val_metrics.far, "f1": val_metrics.f1,
-                        "precision": val_metrics.precision, "latency_ms": val_metrics.latency_ms,
+                        "cdr": sel["cdr"], "far": sel["far"], "f1": sel["f1"],
+                        "precision": 1.0 - sel["far"], "latency_ms": val_metrics.latency_ms,
                         "epoch": epochs_run, "seed": seed, "per_regime": val_metrics.per_regime,
+                        "auprc": val_metrics.auprc, "threshold": sel["threshold"],
+                        "selection_metric": sel["metric"], "selection_score": score,
                     }
+                    self.threshold = sel["threshold"]
                     _save_checkpoint(best_metrics, epochs_run)
                     stale = 0
                 else:
                     stale += 1
             self.history.append(record)
 
-            # never stop while val F1 has not left zero: with 0.16 % positives
-            # the thresholded F1 is 0 for the first epochs although the loss falls
+            # never stop while the selection score has not left zero: with 0.16 %
+            # positives the thresholded F1 is 0 for the first epochs although the loss falls
             if patience > 0 and epochs_run >= min_epochs and stale >= patience and best_f1 > 0:
-                logger.info(f"Early stopping at epoch {epochs_run} (best F1 {best_f1:.4f} @ {best_epoch})")
+                logger.info(f"Early stopping at epoch {epochs_run} (best {threshold_mode} score {best_f1:.4f} @ {best_epoch})")
                 break
 
         if not ckpt_path.exists():
-            best_metrics = {"cdr": 0, "far": 1, "f1": 0, "precision": 0,
-                            "latency_ms": 0, "epoch": epochs_run, "seed": seed, "per_regime": {}}
+            best_metrics = {"cdr": 0, "far": 1, "f1": 0, "precision": 0, "latency_ms": 0, "epoch": epochs_run,
+                            "seed": seed, "per_regime": {}, "auprc": 0.0, "threshold": self.threshold,
+                            "selection_metric": threshold_mode, "selection_score": 0.0}
             _save_checkpoint(best_metrics, epochs_run)
 
         best_metrics = dict(best_metrics)
@@ -316,12 +343,16 @@ class SkyFlowTrainer:
     def evaluate(
         self,
         data: List[Tuple[TKGSnapshot, torch.Tensor]],
+        threshold: Optional[float] = None,
     ) -> MetricResult:
+        """Evaluate at ``threshold`` (default: the trainer's current threshold,
+        i.e. the validation-selected one after training / checkpoint load)."""
         self.model.eval()
         self.head.eval()
         K = self.cfg.data.observation_window
         tc = self.cfg.training
-        metrics = ConflictMetrics(threshold=tc.conflict_threshold,
+        thr = float(threshold) if threshold is not None else float(getattr(self, "threshold", tc.conflict_threshold))
+        metrics = ConflictMetrics(threshold=thr,
                                   regime_ttc_boundary_s=getattr(tc, "regime_ttc_boundary_s", 15.0))
 
         windows = self._group_into_windows(data, K)

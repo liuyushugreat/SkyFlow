@@ -38,6 +38,7 @@ from skyflow.data.cache import get_split
 from skyflow.experiments.baseline_trainer import evaluate_baseline, train_baseline
 from skyflow.experiments.env_info import env_info
 from skyflow.experiments.methods import METHODS, method_config
+from skyflow.models.input_norm import fit_input_norm
 from skyflow.training.trainer import SkyFlowTrainer
 
 
@@ -97,23 +98,28 @@ def run_task(method: str, seed: int, cfg_path: str, results_dir: str, device_str
     np.random.seed(seed)
     if device.type == "cuda":
         torch.cuda.manual_seed_all(seed)
+    normalize = bool(getattr(cfg.features, "normalize_inputs", True))
     if spec.kind == "trgat":
         trainer = SkyFlowTrainer(cfg, device=device)
         trainer.build_model()
+        fit_input_norm(trainer.model, train, enabled=normalize)      # train-split stats, saved in the checkpoint
         n_params = trainer.model.count_parameters() + sum(p.numel() for p in trainer.head.parameters())
         train_info = trainer.train(train, val, seed=seed, output_dir=out, max_epochs=epochs)
         ckpt = torch.load(out / "best_model.pt", map_location=device, weights_only=False)
         trainer.model.load_state_dict(ckpt["model"])
         trainer.head.load_state_dict(ckpt["head"])
+        trainer.threshold = float(ckpt.get("threshold", trainer.threshold))
         test_metrics = trainer.evaluate(test)
         history = trainer.history
     elif spec.kind == "learned":
         model = get_baseline(spec.baseline_name, cfg, device)
+        fit_input_norm(model, train, enabled=normalize)
         n_params = model.count_parameters()
         train_info = train_baseline(model, train, val, cfg, device, seed, out, max_epochs=epochs)
         history = train_info.pop("history", [])
         ckpt = torch.load(out / "best_model.pt", map_location=device, weights_only=False)
         model.load_state_dict(ckpt["model"])
+        model.threshold = float(ckpt.get("threshold", cfg.training.conflict_threshold))
         test_metrics = evaluate_baseline(model, test, cfg, device, deterministic=False)
     else:  # rule
         model = get_baseline(spec.baseline_name, cfg, device)
@@ -137,6 +143,9 @@ def run_task(method: str, seed: int, cfg_path: str, results_dir: str, device_str
         "training": {k: v for k, v in train_info.items()
                      if k not in ("cdr", "far", "f1", "precision", "epoch", "per_regime", "seed")},
         "num_parameters": int(n_params),
+        "threshold_mode": str(getattr(cfg.training, "threshold_mode", "val")),
+        "test_threshold": float(test_metrics.threshold),
+        "normalize_inputs": normalize,
         "data_seconds": data_seconds,
         "total_seconds": time.perf_counter() - t0,
         "peak_gpu_memory_gb": peak_mem,

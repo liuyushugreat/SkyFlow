@@ -65,6 +65,11 @@ def test_cache_key_depends_on_data_not_model_seed():
     c4.features.input_set = "telemetry_only"
     assert cache_key(c4, "train") != k0
     assert cache_key(cfg, "val") != k0
+    # S8: input standardisation happens inside the model -> same cached tensors
+    c5 = copy.deepcopy(cfg)
+    c5.features.normalize_inputs = not cfg.features.normalize_inputs
+    c5.training.threshold_mode = "fixed"
+    assert cache_key(c5, "train") == k0
 
 
 def test_build_split_uses_sim_seed_not_training_seed():

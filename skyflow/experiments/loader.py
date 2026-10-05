@@ -74,8 +74,9 @@ def load_task(dir_: str | Path, device: torch.device, val_data=None) -> LoadedMe
         trainer = SkyFlowTrainer(cfg, device=device)
         trainer.build_model()
         ckpt = torch.load(d / "best_model.pt", map_location=device, weights_only=False)
-        trainer.model.load_state_dict(ckpt["model"])
+        trainer.model.load_state_dict(ckpt["model"])        # includes fitted input_norm buffers
         trainer.head.load_state_dict(ckpt["head"])
+        trainer.threshold = float(ckpt.get("threshold", cfg.training.conflict_threshold))   # val-selected
         trainer.model.eval()
         trainer.head.eval()
         return LoadedMethod(method, spec.kind, seed, cfg, d, trainer.evaluate, trainer=trainer,
@@ -85,6 +86,7 @@ def load_task(dir_: str | Path, device: torch.device, val_data=None) -> LoadedMe
     if spec.kind == "learned":
         ckpt = torch.load(d / "best_model.pt", map_location=device, weights_only=False)
         model.load_state_dict(ckpt["model"])
+        model.threshold = float(ckpt.get("threshold", cfg.training.conflict_threshold))
         model.eval()
         ep = ckpt.get("epoch")
     else:

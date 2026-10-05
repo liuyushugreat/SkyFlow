@@ -14,6 +14,7 @@ import torch
 import torch.nn as nn
 
 from skyflow.data.tkg_builder import TKGSnapshot
+from skyflow.models.input_norm import InputStandardizer
 
 
 class LSTMPair(nn.Module):
@@ -27,6 +28,7 @@ class LSTMPair(nn.Module):
         dropout: float = 0.1,
     ):
         super().__init__()
+        self.input_norm = InputStandardizer(input_dim)
         self.encoder = nn.LSTM(
             input_size=input_dim,
             hidden_size=hidden_dim,
@@ -66,7 +68,7 @@ class LSTMPair(nn.Module):
         # multi-layer LSTM aborts the process (0xC0000409) on Windows/CUDA 13
         # (torch 2.14).  History length is 1, so the native kernel costs nothing.
         with torch.backends.cudnn.flags(enabled=False):
-            _, (h_n, _) = self.encoder(history)
+            _, (h_n, _) = self.encoder(self.input_norm(history))
         embeddings = h_n[-1]
 
         pairs = snapshot.conflict_pairs

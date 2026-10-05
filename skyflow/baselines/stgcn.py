@@ -14,6 +14,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from skyflow.data.tkg_builder import TKGSnapshot
+from skyflow.models.input_norm import InputStandardizer
 
 
 class GraphConvLayer(nn.Module):
@@ -57,6 +58,7 @@ class STGCN(nn.Module):
         dropout: float = 0.1,
     ):
         super().__init__()
+        self.input_norm = InputStandardizer(input_dim)
         self.input_proj = nn.Linear(input_dim, hidden_dim)
 
         self.gcn_layers = nn.ModuleList()
@@ -77,7 +79,7 @@ class STGCN(nn.Module):
 
     def forward(self, snapshot: TKGSnapshot) -> torch.Tensor:
         n_uav = snapshot.num_uavs
-        x = self.input_proj(snapshot.node_features[:n_uav])
+        x = self.input_proj(self.input_norm(snapshot.node_features[:n_uav]))
 
         adj_src, adj_dst = self._merge_edges(snapshot.edge_indices, n_uav)
 

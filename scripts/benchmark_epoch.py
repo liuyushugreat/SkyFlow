@@ -33,6 +33,7 @@ from skyflow.data.cache import cache_paths, get_split
 from skyflow.experiments.baseline_trainer import train_baseline
 from skyflow.experiments.env_info import env_info
 from skyflow.experiments.methods import METHODS, method_config
+from skyflow.models.input_norm import fit_input_norm
 from skyflow.training.trainer import SkyFlowTrainer
 
 
@@ -110,11 +111,13 @@ def main():
     if spec.kind == "trgat":
         trainer = SkyFlowTrainer(cfg, device=device)
         trainer.build_model()
+        fit_input_norm(trainer.model, train, enabled=bool(getattr(cfg.features, "normalize_inputs", True)))
         n_params = trainer.model.count_parameters() + sum(p.numel() for p in trainer.head.parameters())
         info = trainer.train(train, val, seed=args.seed, output_dir=out_dir, max_epochs=args.epochs)
         history = trainer.history
     else:
         model = get_baseline(spec.baseline_name, cfg, device)
+        fit_input_norm(model, train, enabled=bool(getattr(cfg.features, "normalize_inputs", True)))
         n_params = model.count_parameters()
         info = train_baseline(model, train, val, cfg, device, args.seed, out_dir, max_epochs=args.epochs)
         history = info.pop("history", [])

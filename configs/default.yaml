@@ -37,6 +37,7 @@ data:
 features:
   leakage_free: true        # false reproduces the MobiHoc-submission feature set
   input_set: full           # full | telemetry_only
+  normalize_inputs: true    # S8: standardise node features with train mean/std (false = raw inputs, legacy)
 
 labels:
   mode: lookahead           # lookahead (30 s window) | instantaneous (legacy)
@@ -79,7 +80,8 @@ training:
   focal_gamma: 2.0
   focal_alpha: 0.75
   loss: focal               # focal | bce (abl_bce)
-  conflict_threshold: 0.42
+  conflict_threshold: 0.42  # used only when threshold_mode = fixed
+  threshold_mode: val       # S8: pick the F1-optimal threshold on val per model, freeze it for test (fixed = legacy)
   warmup_steps: 1000
   seed: 42
   num_seeds: 5

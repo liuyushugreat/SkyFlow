@@ -33,6 +33,14 @@ class MetricResult:
     # per-snapshot [tp, fp, fn] (fn includes missed positives), in evaluation
     # order; enables bootstrap over test scenarios without re-running models
     per_snapshot: List[List[int]] = field(default_factory=list)
+    # threshold-free / threshold-swept quantities (S8): used for model
+    # selection on the validation split; the chosen threshold is then applied to test
+    threshold: float = 0.42
+    auprc: float = 0.0
+    best_f1: float = 0.0
+    best_threshold: float = 0.42
+    best_cdr: float = 0.0
+    best_far: float = 0.0
 
     def to_dict(self) -> Dict:
         from dataclasses import asdict
@@ -40,6 +48,38 @@ class MetricResult:
 
 
 STAGES = ("graph_build", "gnn_forward", "pair_scoring")
+
+
+def threshold_sweep(preds: np.ndarray, labels: np.ndarray, n_missed: int = 0) -> Dict[str, float]:
+    """Average precision (AUPRC) and the F1-optimal operating point over all
+    score cut-offs.  Missed positives (never scored) count as false negatives
+    at every threshold, so recall is pipeline-level."""
+    n_pos_total = int(np.sum(labels >= 0.5)) + int(n_missed)
+    if preds.size == 0 or n_pos_total == 0:
+        return {"auprc": 0.0, "best_f1": 0.0, "best_threshold": 0.5, "best_cdr": 0.0, "best_far": 1.0}
+    order = np.argsort(-preds, kind="stable")
+    p = preds[order]
+    y = (labels[order] >= 0.5).astype(np.float64)
+    tp = np.cumsum(y)
+    fp = np.cumsum(1.0 - y)
+    k = np.arange(1, p.size + 1)
+    precision = tp / k
+    recall = tp / n_pos_total
+    # AP = sum over positives of precision at that rank (step-wise PR integral)
+    auprc = float(np.sum(precision * y) / n_pos_total)
+    # only consider cut-offs at the last index of each distinct score
+    last = np.ones(p.size, dtype=bool)
+    last[:-1] = p[1:] != p[:-1]
+    f1 = 2 * precision * recall / np.maximum(precision + recall, 1e-12)
+    f1 = np.where(last, f1, -1.0)
+    i = int(np.argmax(f1))
+    return {
+        "auprc": auprc,
+        "best_f1": float(f1[i]),
+        "best_threshold": float(p[i]),
+        "best_cdr": float(recall[i]),
+        "best_far": float(1.0 - precision[i]),
+    }
 CAUSE_NAMES = ("planned_crossing", "wind_deviation", "nonconforming", "priority_insertion", "noncooperative")
 
 
@@ -166,6 +206,7 @@ class ConflictMetrics:
 
         stage_ms = {k: float(np.mean(v)) for k, v in self.stages.items() if v}
         stage_p95 = {k: float(np.percentile(v, 95)) for k, v in self.stages.items() if v}
+        sweep = threshold_sweep(preds.astype(np.float64), labels, self.n_missed)
 
         return MetricResult(
             cdr=float(recall),
@@ -182,6 +223,8 @@ class ConflictMetrics:
             stage_p95_ms=stage_p95,
             per_regime=self._per_regime(preds, labels, ttc, cause),
             per_snapshot=list(self.per_snapshot),
+            threshold=float(self.threshold),
+            **sweep,
         )
 
 

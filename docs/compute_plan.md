@@ -140,6 +140,29 @@ python scripts/run_main.py --config configs/default.yaml --results_dir results/m
     --methods abl_no_gating abl_no_gru abl_bce abl_telemetry_only --seeds 42 123 456 --max_concurrent 2 --resume
 ```
 
+## 7. Restart note (2026-10-05 evening, protocol fix S8b)
+
+The first main launch (20:20) was stopped after 15 TR-GAT epochs: val F1 at the fixed threshold 0.42
+stayed at 0 and the "best" checkpoint was frozen at epoch 1. Diagnosis on the 2-epoch dry-run checkpoint
+(CPU, 100 val snapshots): predictions compressed into [0.09, 0.21], AUROC 0.72, AUPRC 0.005. Two causes,
+both protocol-level and therefore fixed uniformly for every learned method before relaunching:
+
+1. **Raw node features were fed unscaled** (metres up to 5000 next to flags). Fix: `InputStandardizer`
+   (per-feature mean/std buffers fitted on the training split, stored in the checkpoint) in TR-GAT and all
+   learned baselines; switch `features.normalize_inputs` (default `true`, `false` = legacy raw inputs).
+   The switch is excluded from the dataset cache key, so the 5 km cache is reused unchanged.
+2. **Model selection at a fixed threshold** is meaningless at a 0.16 % positive rate. Fix:
+   `training.threshold_mode: val` (default) selects the F1-optimal threshold on the validation split each
+   epoch (AUPRC also logged), early-stops on that best-F1, stores the threshold in the checkpoint and
+   applies it unchanged to the test split (and in `eval_only`, robustness and scaling). `fixed` restores the
+   old behaviour. Rule baselines are unaffected (binary output).
+
+Verification before relaunch: `pytest -q` 106 passed; 12-method smoke (`configs/smoke.yaml`) + `eval_only`,
+`aggregate_main`, `aggregate_ablation`, `run_robustness`, `run_scaling`, `analyze_attention_aoi` all run on
+the smoke outputs; 3-epoch TR-GAT sanity on the real cache (`results/_sanity`, see `logs/sanity_trgat.log`).
+`results/main` from the aborted launch was deleted. The schedule in §4 shifts by the restart time only
+(≈ 1.5 h); the no-rent decision is unchanged.
+
 ## Conclusion
 
 **Do not rent: the local 4090 (2 concurrent tasks) finishes the main experiment and 3-seed ablations by about 10-07 evening even if every run goes to 150 epochs.**

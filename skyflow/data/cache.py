@@ -30,6 +30,8 @@ from skyflow.data.tkg_builder import TKGSnapshot
 DATA_SECTIONS = ("data", "sim", "labels", "features", "temporal", "graph", "scoring")
 _IGNORED_DATA_KEYS = {"cache_dir", "scenario_minutes_train", "scenario_minutes_val",
                       "scenario_minutes_test", "uav_feature_dim"}
+# model-side switches that live in a data section but do not change the cached tensors
+_IGNORED_FEATURE_KEYS = {"normalize_inputs"}   # standardisation is applied inside the model (S8)
 
 
 def git_commit(repo: Optional[Path] = None) -> str:
@@ -51,6 +53,8 @@ def data_signature(cfg: SkyFlowConfig, split: str) -> Dict:
             d["num_scenarios"] = cfg.data.split_scenarios(split)
             for k in ("train_scenarios", "val_scenarios", "test_scenarios"):
                 d.pop(k, None)
+        elif s == "features":
+            d = {k: v for k, v in d.items() if k not in _IGNORED_FEATURE_KEYS}
         sig[s] = d
     sig["split"] = split
     return sig
