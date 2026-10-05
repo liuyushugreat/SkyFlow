@@ -101,6 +101,7 @@ class AirspaceState:
 
 DELTA_MODES = ("aoi", "legacy")
 NEIGHBOR_SEARCH_MODES = ("grid", "bruteforce")
+INPUT_SETS = ("full", "telemetry_only")   # telemetry_only: UAV nodes + approaches edges only
 # Relations whose (undirected) UAV pairs form the pairwise-scoring candidate set.
 CANDIDATE_RELATIONS = ("approaches", "shares_corridor")
 
@@ -146,6 +147,7 @@ class TKGBuilder:
         leakage_free: bool = True,
         delta_mode: str = "aoi",
         neighbor_search: str = "grid",
+        input_set: str = "full",
     ):
         if delta_mode not in DELTA_MODES:
             raise ValueError(f"delta_mode must be one of {DELTA_MODES}, got {delta_mode!r}")
@@ -153,6 +155,10 @@ class TKGBuilder:
             raise ValueError(
                 f"neighbor_search must be one of {NEIGHBOR_SEARCH_MODES}, got {neighbor_search!r}"
             )
+        if input_set not in INPUT_SETS:
+            raise ValueError(f"input_set must be one of {INPUT_SETS}, got {input_set!r}")
+        self.input_set = input_set
+        self.telemetry_only = input_set == "telemetry_only"
         self.approach_cpa_h = approach_cpa_h
         self.approach_cpa_v = approach_cpa_v
         self.approach_lookahead = approach_lookahead
@@ -186,9 +192,12 @@ class TKGBuilder:
         """Construct a TKG snapshot from raw airspace state."""
         t_start = time.perf_counter()
         n_uav = state.uav_positions.shape[0]
-        n_sec = state.sector_occupancy.shape[0]
-        n_wx = state.weather_cells.shape[0]
-        n_rz = state.restricted_zones.shape[0]
+        if self.telemetry_only:
+            n_sec = n_wx = n_rz = 0
+        else:
+            n_sec = state.sector_occupancy.shape[0]
+            n_wx = state.weather_cells.shape[0]
+            n_rz = state.restricted_zones.shape[0]
         n_total = n_uav + n_sec + n_wx + n_rz
 
         node_features = self._build_node_features(state, n_total, n_uav, n_sec, n_wx, n_rz)
@@ -352,9 +361,10 @@ class TKGBuilder:
         t = state.epoch_time
 
         self._add_approach_edges(state, n_uav, t, edge_indices, edge_deltas)
-        self._add_corridor_edges(state, n_uav, t, edge_indices, edge_deltas)
-        self._add_weather_edges(state, n_uav, n_sec, n_wx, t, edge_indices, edge_deltas)
-        self._add_restriction_edges(state, n_uav, n_sec, n_wx, n_rz, t, edge_indices, edge_deltas)
+        if not self.telemetry_only:
+            self._add_corridor_edges(state, n_uav, t, edge_indices, edge_deltas)
+            self._add_weather_edges(state, n_uav, n_sec, n_wx, t, edge_indices, edge_deltas)
+            self._add_restriction_edges(state, n_uav, n_sec, n_wx, n_rz, t, edge_indices, edge_deltas)
 
         return edge_indices, edge_deltas
 

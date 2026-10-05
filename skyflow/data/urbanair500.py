@@ -53,6 +53,15 @@ SPLIT_IDS = {"train": 0, "val": 1, "test": 2}
 LABEL_MODES = ("lookahead", "instantaneous")
 OBSERVATION_MODELS = ("adsb", "legacy")
 CANDIDATE_MODES = ("proximity", "edges", "all", "sampled")
+DENSITY_PRESETS = ("dense", "legacy")
+# "dense": layered airspace (4 altitude layers), hub-converging waypoints,
+#          tighter start area -> positives become a usable fraction.
+# "legacy": original UrbanAir-500 random plans (positives ~0 at 5 km / N=500).
+DENSE_ALTITUDE_LAYERS_M = (60.0, 80.0, 100.0, 120.0)
+DENSE_LAYER_JITTER_M = 1.0
+DENSE_HUB_PROB = 0.7          # probability that the next waypoint is a corridor hub
+DENSE_HUB_CHOICES = 3         # pick among the k nearest hubs
+DENSE_START_AREA_PER_UAV = 5.0  # effective start square side = N * this (m), capped by grid
 CEP_TO_SIGMA = 1.0 / 1.1774          # 2-D Gaussian: CEP = 1.1774 sigma
 VERTICAL_SIGMA_FACTOR = 1.5
 
@@ -134,6 +143,10 @@ class TruthLog:
     latency_u: Optional[np.ndarray] = None      # (N,) U(0,1) -> per-UAV link latency
     loss_u: Optional[np.ndarray] = None         # (n_total, N) U(0,1) -> lost iff u < p
     gps_noise_unit: Optional[np.ndarray] = None # (n_total, N, 3) N(0,1) per report
+    # Static infrastructure of the scenario (restricted zones etc.) so that a
+    # log can be observed later without re-generating the simulator state.
+    infrastructure: Optional[Dict[str, np.ndarray]] = None
+    scenario_id: Optional[Tuple[str, int]] = None   # (split, index)
 
     @property
     def num_uavs(self) -> int:
@@ -166,6 +179,7 @@ class UrbanAir500:
         weather_update_s: float = 5.0,
         registry_update_s: float = 10.0,
         corridor_update_s: float = 1.0,
+        density_preset: str = "dense",
     ):
         if label_mode not in LABEL_MODES:
             raise ValueError(f"label_mode must be one of {LABEL_MODES}, got {label_mode!r}")
@@ -173,6 +187,9 @@ class UrbanAir500:
             raise ValueError(
                 f"observation_model must be one of {OBSERVATION_MODELS}, got {observation_model!r}"
             )
+        if density_preset not in DENSITY_PRESETS:
+            raise ValueError(f"density_preset must be one of {DENSITY_PRESETS}, got {density_preset!r}")
+        self.density_preset = density_preset
         self.num_uavs = num_uavs
         self.grid_size = grid_size
         self.altitude_range = altitude_range
@@ -235,6 +252,23 @@ class UrbanAir500:
 
         self.corridor_nodes = self._generate_corridor_graph()
 
+    def export_infrastructure(self) -> Dict[str, np.ndarray]:
+        return {
+            "sector_centers": self.sector_centers.copy(),
+            "weather_positions": self.weather_positions.copy(),
+            "restricted_zones": self.restricted_zones.copy(),
+            "corridor_nodes": self.corridor_nodes.copy(),
+        }
+
+    def load_infrastructure(self, infra: Dict[str, np.ndarray]) -> None:
+        self.sector_centers = infra["sector_centers"].copy()
+        self.weather_positions = infra["weather_positions"].copy()
+        self.restricted_zones = infra["restricted_zones"].copy()
+        self.corridor_nodes = infra["corridor_nodes"].copy()
+        self.num_sectors = self.sector_centers.shape[0]
+        self.num_weather_cells = self.weather_positions.shape[0]
+        self.num_restricted_zones = self.restricted_zones.shape[0]
+
     def _generate_corridor_graph(self) -> np.ndarray:
         nodes = []
         lo = min(200.0, 0.1 * self.grid_size)
@@ -245,11 +279,19 @@ class UrbanAir500:
             nodes.append([x, y, z])
         return np.array(nodes, dtype=np.float32)
 
+    def _dense_altitude(self) -> float:
+        layer = DENSE_ALTITUDE_LAYERS_M[self.rng.randint(len(DENSE_ALTITUDE_LAYERS_M))]
+        z = layer + self.rng.uniform(-DENSE_LAYER_JITTER_M, DENSE_LAYER_JITTER_M)
+        return float(np.clip(z, self.altitude_range[0], self.altitude_range[1]))
+
     def generate_flight_plans(self, num_plans: int = 500) -> List[UAVFlightPlan]:
         plans = []
-        effective_grid = min(self.grid_size, self.num_uavs * 8.0)
+        dense = self.density_preset == "dense"
+        per_uav = DENSE_START_AREA_PER_UAV if dense else 8.0
+        effective_grid = min(self.grid_size, self.num_uavs * per_uav)
         center = self.grid_size / 2.0
         margin = min(50.0, 0.02 * self.grid_size)
+        hubs = self.corridor_nodes
 
         for uid in range(num_plans):
             n_wp = self.rng.randint(3, 8)
@@ -257,13 +299,22 @@ class UrbanAir500:
             waypoints[0] = [
                 center + self.rng.uniform(-effective_grid / 2, effective_grid / 2),
                 center + self.rng.uniform(-effective_grid / 2, effective_grid / 2),
-                self.rng.uniform(*self.altitude_range),
+                self._dense_altitude() if dense else self.rng.uniform(*self.altitude_range),
             ]
             for w in range(1, n_wp):
-                dx = self.rng.uniform(-800, 800)
-                dy = self.rng.uniform(-800, 800)
-                dz = self.rng.uniform(-20, 20)
-                waypoints[w] = waypoints[w - 1] + [dx, dy, dz]
+                if dense and len(hubs) > 0 and self.rng.rand() < DENSE_HUB_PROB:
+                    # fly to one of the k nearest corridor hubs (converging traffic),
+                    # staying in the current altitude layer
+                    d = np.linalg.norm(hubs[:, :2] - waypoints[w - 1, :2], axis=1)
+                    k = min(DENSE_HUB_CHOICES, len(hubs))
+                    hub = hubs[np.argpartition(d, k - 1)[:k][self.rng.randint(k)]]
+                    waypoints[w, :2] = hub[:2] + self.rng.uniform(-30, 30, 2)
+                    waypoints[w, 2] = waypoints[w - 1, 2]
+                else:
+                    dx = self.rng.uniform(-800, 800)
+                    dy = self.rng.uniform(-800, 800)
+                    dz = 0.0 if dense else self.rng.uniform(-20, 20)
+                    waypoints[w] = waypoints[w - 1] + [dx, dy, dz]
                 waypoints[w, :2] = np.clip(waypoints[w, :2], margin, self.grid_size - margin)
                 waypoints[w, 2] = np.clip(
                     waypoints[w, 2], self.altitude_range[0], self.altitude_range[1]
@@ -336,6 +387,7 @@ class UrbanAir500:
             latency_u=self.rng.uniform(0.0, 1.0, N).astype(np.float32),
             loss_u=self.rng.uniform(0.0, 1.0, (n_total, N)).astype(np.float32),
             gps_noise_unit=self.rng.randn(n_total, N, 3).astype(np.float32),
+            infrastructure=self.export_infrastructure(),
         )
 
         for epoch in range(n_total):
@@ -732,36 +784,65 @@ class UrbanAir500:
         the metrics.  ``conflict_ttc`` holds time-to-conflict (s) for
         positives, -1 otherwise.
         """
+        logs = self.simulate_logs(split, num_scenarios, scenario_duration)
+        return self.dataset_from_logs(
+            logs, device=device, builder=builder, obs_params=obs_params,
+            candidates=candidates, proximity_margin_m=proximity_margin_m,
+        )
+
+    def simulate_logs(
+        self, split: str, num_scenarios: int, scenario_duration: float = 60.0
+    ) -> List[TruthLog]:
+        """Run the physics for ``num_scenarios`` deterministic scenarios and
+        return their truth logs (infrastructure embedded).  Observation
+        conditions are *not* applied here, so the same logs can be observed
+        under different latency / loss / CEP settings."""
+        logs = []
+        extra = self.lookahead_s if self.label_mode == "lookahead" else 0.0
+        for scenario_idx in range(num_scenarios):
+            self.rng = np.random.RandomState(scenario_seed(self.base_seed, split, scenario_idx))
+            self._init_infrastructure()
+            plans = self.generate_flight_plans(self.num_uavs)
+            log = self.run_physics(plans, scenario_duration, extra_seconds=extra)
+            log.scenario_id = (split, scenario_idx)
+            logs.append(log)
+        return logs
+
+    def dataset_from_logs(
+        self,
+        logs: List[TruthLog],
+        device: torch.device = torch.device("cpu"),
+        builder: Optional[TKGBuilder] = None,
+        obs_params: Optional[ObservationParams] = None,
+        candidates: str = "proximity",
+        proximity_margin_m: float = 50.0,
+        epoch_step: int = 10,
+    ) -> List[Tuple[TKGSnapshot, torch.Tensor]]:
+        """Observe existing truth logs (optionally under new ``obs_params``)
+        and build labelled snapshots.  Labels depend only on the truth, so
+        they are identical across observation conditions."""
         if candidates not in CANDIDATE_MODES:
             raise ValueError(f"candidates must be one of {CANDIDATE_MODES}, got {candidates!r}")
         builder = builder if builder is not None else TKGBuilder()
         params = obs_params if obs_params is not None else self.obs_params
         dataset = []
-        epoch_step = 10
-
-        for scenario_idx in range(num_scenarios):
-            self.rng = np.random.RandomState(
-                scenario_seed(self.base_seed, split, scenario_idx)
-            )
-            self._init_infrastructure()
-            builder.reset()
-            plans = self.generate_flight_plans(self.num_uavs)
-
-            for epoch_idx, (state, conflicts) in enumerate(
-                self.simulate_scenario(
-                    scenario_duration, plans, label_every=epoch_step, obs_params=obs_params
+        for log in logs:
+            if log.infrastructure is not None:
+                self.load_infrastructure(log.infrastructure)
+            if log.scenario_id is not None:          # deterministic legacy negative sampling
+                self.rng = np.random.RandomState(
+                    scenario_seed(self.base_seed, log.scenario_id[0], log.scenario_id[1]) + 1
                 )
-            ):
-                if epoch_idx % epoch_step != 0:
-                    continue
-
+            builder.reset()
+            for epoch in range(0, log.n_epochs, epoch_step):
+                state = self.observe(log, epoch, params)
+                conflicts = self.label(log, epoch)
                 snapshot = builder.build(state, device=device)
                 self.attach_pair_labels(
                     snapshot, conflicts, candidates, device,
                     obs_params=params, proximity_margin_m=proximity_margin_m,
                 )
                 dataset.append((snapshot, snapshot.conflict_labels))
-
         return dataset
 
     def proximity_candidates(

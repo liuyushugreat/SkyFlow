@@ -111,7 +111,8 @@ def test_dataset_edges_mode_records_missed_positives():
 @pytest.mark.parametrize("n_uavs,grid_size,seed", [(200, 1500.0, 1), (120, 1000.0, 5), (300, 5000.0, 9)])
 def test_proximity_candidates_have_full_recall(n_uavs, grid_size, seed):
     sim = UrbanAir500(num_uavs=n_uavs, grid_size=grid_size, seed=seed, lookahead_s=30.0,
-                      num_sectors=4, num_weather_cells=4, num_restricted_zones=1)
+                      num_sectors=4, num_weather_cells=4, num_restricted_zones=1,
+                      density_preset="legacy")
     b = TKGBuilder(neighbor_search="grid")
     data = sim.generate_dataset("val", 1, 20.0, builder=b, candidates="proximity")
     n_pos = sum(int(s.conflict_labels.sum()) for s, _ in data)

@@ -89,6 +89,7 @@ class SimConfig:
     Training defaults reproduce the paper's claimed conditions
     (ADS-B latency 0.5–1.2 s, GPS CEP 2.5 m, no packet loss)."""
     observation_model: str = "adsb"           # "adsb" | "legacy" (observation == truth)
+    density_preset: str = "dense"             # "dense" (layered airspace, hub-converging plans) | "legacy"
     adsb_latency_s: List[float] = field(default_factory=lambda: [0.5, 1.2])  # scalar or [lo, hi]
     packet_loss: float = 0.0                  # per-report loss probability, 0–0.3
     gps_cep_m: float = 2.5
@@ -170,6 +171,7 @@ class SkyFlowConfig:
             leakage_free=self.leakage_free(),
             delta_mode=self.delta_mode(),
             neighbor_search=graph.neighbor_search,
+            input_set=getattr(self.features, "input_set", "full"),
         )
 
     def dataset_kwargs(self) -> dict:
@@ -215,6 +217,7 @@ class SkyFlowConfig:
             label_mode=self.label_mode(),
             lookahead_s=self.data.lookahead_seconds,
             observation_model=sim.observation_model,
+            density_preset=getattr(sim, "density_preset", "dense"),
             packet_loss=obs.packet_loss,
             weather_update_s=obs.weather_update_s,
             registry_update_s=obs.registry_update_s,

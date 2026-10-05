@@ -47,6 +47,7 @@ baselines:
 
 sim:
   observation_model: adsb   # adsb (latency + loss + GPS noise) | legacy (observation == truth)
+  density_preset: dense     # dense (4 altitude layers, hub-converging waypoints, N*5 m start area) | legacy
   adsb_latency_s: [0.5, 1.2]  # per-UAV link latency, scalar or [lo, hi]
   packet_loss: 0.0          # per-report loss probability
   gps_cep_m: 2.5
