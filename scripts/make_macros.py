@@ -18,6 +18,7 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from paper_common import Results, fmt, fmt_p, macro_name  # noqa: E402
 
 _DIGITS = "Zero One Two Three Four Five Six Seven Eight Nine".split()
@@ -59,10 +60,14 @@ def main():
     ap.add_argument("--results_dir", default="results")
     ap.add_argument("--out", default="paper/numbers.tex")
     ap.add_argument("--reference", default="TR-GAT")
+    ap.add_argument("--config", default="configs/default.yaml", help="fallback if no task config.yaml is found")
     args = ap.parse_args()
     res = Results(args.results_dir)
     M = Macros()
     ref = args.reference
+    # 1 while the numbers come from a smoke / dry-run directory -> the paper prints a watermark
+    M.add("numbersAreSmoke", 1 if any(tag in str(res.dir) for tag in ("_smoke", "_dryrun", "_sanity")) else 0)
+    M.add("numbersSource", str(res.dir).replace("\\", "/").replace("_", "\\_"))
 
     # ---- main table -----------------------------------------------------
     if res.summary is not None:
@@ -112,6 +117,32 @@ def main():
             if env.get(k):
                 M.add(macro_name("env", k), str(env[k]).replace("_", "\\_"))
 
+    # ---- configuration facts (from the run's own config.yaml, merged with defaults) ----
+    cfg_path = next(iter(sorted(res.main_dir.glob(f"{ref}/seed*/config.yaml"))), None) or Path(args.config)
+    try:
+        from dataclasses import asdict
+        from skyflow.config import SkyFlowConfig
+        cfg = asdict(SkyFlowConfig.from_yaml(str(cfg_path)))
+        d, s, t, m, sc = cfg["data"], cfg["sim"], cfg["training"], cfg["model"], cfg["scoring"]
+        lat = s["adsb_latency_s"]
+        lat = lat if isinstance(lat, list) else [lat, lat]
+        for name, val in (("cfgLookaheadS", f"{d['lookahead_seconds']:g}"), ("cfgSepHM", f"{d['conflict_h_sep_m']:g}"),
+                          ("cfgSepVM", f"{d['conflict_v_sep_m']:g}"), ("cfgWindowK", d["observation_window"]),
+                          ("cfgSimHz", f"{d['sim_freq_hz']:g}"), ("cfgAdsbLatLo", f"{lat[0]:g}"), ("cfgAdsbLatHi", f"{lat[1]:g}"),
+                          ("cfgGpsCepM", f"{s['gps_cep_m']:g}"), ("cfgProximityMarginM", f"{sc['proximity_margin_m']:g}"),
+                          ("cfgNumLayers", m["num_layers"]), ("cfgEmbedDim", m["embed_dim"]), ("cfgNumHeads", m["num_heads"]),
+                          ("cfgTemporalDim", m["temporal_dim"]), ("cfgRecurrentDim", m["recurrent_dim"]),
+                          ("cfgLr", f"{t['learning_rate']:g}"), ("cfgEpochsMax", t["epochs"]), ("cfgPatience", t["early_stopping_patience"]),
+                          ("cfgFocalGamma", f"{t['focal_gamma']:g}"), ("cfgFocalAlpha", f"{t['focal_alpha']:g}"),
+                          ("cfgRegimeTtcS", f"{t['regime_ttc_boundary_s']:g}"), ("cfgNumSectors", d["num_sectors"]),
+                          ("cfgNumZones", d["num_restricted_zones"])):
+            M.add(name, val)
+        mix = s.get("cause_mix") or {}
+        for k, v in mix.items():
+            M.add(macro_name("cfgCausePct", k), f"{float(v) * 100:g}")
+    except Exception as e:  # config facts are optional
+        print("[warn] config macros skipped:", e)
+
     # ---- ablation -------------------------------------------------------
     if res.ablation is not None:
         for _, r in res.ablation.iterrows():
@@ -156,7 +187,7 @@ def main():
             M.num(f"alpha{key}", f.get("alpha"), 2)
             M.num(f"alpha{key}Se", f.get("alpha_se"), 2)
             M.num(f"alpha{key}Rsq", f.get("r2"), 3)
-        M.add("scalingMode", res.scaling_fit.get("mode", ""))
+        M.add("scalingMode", str(res.scaling_fit.get("mode", "")).replace("_", " "))
         ok = res.scaling_fit.get("sizes_ok", [])
         if ok:
             M.add("scalingSizes", ", ".join(str(int(n)) for n in ok))

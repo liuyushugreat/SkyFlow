@@ -15,3 +15,14 @@ results/_smoke/
 results/_dryrun/
 logs/
 results/_sanity/
+
+# LaTeX build files (paper/)
+paper/*.aux
+paper/*.log
+paper/*.blg
+paper/*.bbl
+paper/*.out
+paper/*.synctex.gz
+paper/figs/*.aux
+paper/figs/*.log
+paper/skyflow_iscas2027.pdf

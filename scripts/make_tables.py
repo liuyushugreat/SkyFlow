@@ -94,10 +94,11 @@ def tab_main(res: Results, out: Path, methods):
             f"CPU={env.get('cpu_model', '')}; torch={env.get('torch', '')}; git={rows[0][1].get('git_commits', '')}\n"
             f"% * : p<0.05 vs {ref} (paired t-test over seeds, Bonferroni); dagger : not significant\n")
     _write(out, note + "\n".join(lines) + "\n")
-    # companion macro-free caption fragment
+    # companion caption fragment as a macro (\input it in the preamble, use \tabMainNote in \caption)
     _write(out.with_name(out.stem + "_note.tex"),
-           f"Mean$\\pm$std over {max(n_seeds)} seeds; latency P95 measured on one {tex_escape(gpu)}. "
-           f"$^{{*}}$: $p<0.05$ vs.\\ {tex_escape(ref)} (paired $t$-test, Bonferroni); $^{{\\dagger}}$: n.s.\n")
+           "\\newcommand{\\tabMainNote}{"
+           f"Latency P95 measured on one {tex_escape(gpu)}. "
+           f"$^{{*}}$: $p<0.05$ vs.\\ {tex_escape(ref)} (paired $t$-test over seeds, Bonferroni); $^{{\\dagger}}$: n.s.}}\n")
 
 
 # --------------------------------------------------------------------------- ablation table
