@@ -24,43 +24,69 @@ class MetricResult:
     latency_mean_ms: float
     num_pairs: int
     num_positives: int
+    # S4: positives outside the candidate set (counted as FN) and per-stage timing
+    num_missed_positives: int = 0
+    stage_ms: Dict[str, float] = field(default_factory=dict)   # mean ms per stage
+    stage_p95_ms: Dict[str, float] = field(default_factory=dict)
+
+
+STAGES = ("graph_build", "gnn_forward", "pair_scoring")
 
 
 class ConflictMetrics:
-    """Accumulates predictions across batches and computes final metrics."""
+    """Accumulates predictions across batches and computes final metrics.
+
+    Positives that were never scored (because the candidate pre-filter
+    dropped them) are passed via ``n_missed`` and counted as false negatives,
+    so CDR reflects the whole pipeline, not only the scorer."""
 
     def __init__(self, threshold: float = 0.42):
         self.threshold = threshold
         self.all_preds: List[np.ndarray] = []
         self.all_labels: List[np.ndarray] = []
         self.latencies: List[float] = []
+        self.n_missed = 0
+        self.stages: Dict[str, List[float]] = {s: [] for s in STAGES}
 
     def reset(self):
         self.all_preds.clear()
         self.all_labels.clear()
         self.latencies.clear()
+        self.n_missed = 0
+        for v in self.stages.values():
+            v.clear()
 
     def update(
         self,
         preds: torch.Tensor,
         labels: torch.Tensor,
         latency_ms: Optional[float] = None,
+        n_missed: int = 0,
+        stage_ms: Optional[Dict[str, float]] = None,
     ):
         self.all_preds.append(preds.detach().cpu().numpy())
         self.all_labels.append(labels.detach().cpu().numpy())
         if latency_ms is not None:
             self.latencies.append(latency_ms)
+        self.n_missed += int(n_missed)
+        if stage_ms:
+            for k, v in stage_ms.items():
+                self.stages.setdefault(k, []).append(float(v))
+
+    def add_missed(self, n_missed: int):
+        """Record positives of a snapshot that had no scored pairs at all."""
+        self.n_missed += int(n_missed)
 
     def compute(self) -> MetricResult:
-        preds = np.concatenate(self.all_preds)
-        labels = np.concatenate(self.all_labels)
+        preds = np.concatenate(self.all_preds) if self.all_preds else np.zeros(0)
+        labels = np.concatenate(self.all_labels) if self.all_labels else np.zeros(0)
 
         predicted_pos = preds >= self.threshold
         actual_pos = labels >= 0.5
 
         tp = np.sum(predicted_pos & actual_pos)
         fp = np.sum(predicted_pos & ~actual_pos)
-        fn = np.sum(~predicted_pos & actual_pos)
+        fn = np.sum(~predicted_pos & actual_pos) + self.n_missed
         tn = np.sum(~predicted_pos & ~actual_pos)
 
         recall = tp / max(tp + fn, 1)
@@ -75,6 +101,9 @@ class ConflictMetrics:
             lat_95 = 0.0
             lat_mean = 0.0
 
+        stage_ms = {k: float(np.mean(v)) for k, v in self.stages.items() if v}
+        stage_p95 = {k: float(np.percentile(v, 95)) for k, v in self.stages.items() if v}
+
         return MetricResult(
             cdr=float(recall),
             far=float(far),
@@ -84,7 +113,10 @@ class ConflictMetrics:
             latency_ms=lat_95,
             latency_mean_ms=lat_mean,
             num_pairs=len(preds),
-            num_positives=int(np.sum(actual_pos)),
+            num_positives=int(np.sum(actual_pos)) + self.n_missed,
+            num_missed_positives=self.n_missed,
+            stage_ms=stage_ms,
+            stage_p95_ms=stage_p95,
         )
 
 

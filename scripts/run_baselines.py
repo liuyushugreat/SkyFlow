@@ -105,12 +105,12 @@ def main():
 
     logger.info("Generating data...")
     sim = cfg.make_simulator(seed=42)
-    builder = cfg.make_builder()
+    ds_kw = cfg.dataset_kwargs()
     n_sc = 3 if args.quick else 10
     dur = 10.0 if args.quick else 60.0
 
-    train_data = sim.generate_dataset("train", n_sc, dur, device, builder=builder)
-    test_data = sim.generate_dataset("test", max(n_sc // 2, 1), dur, device, builder=builder)
+    train_data = sim.generate_dataset("train", n_sc, dur, device, **ds_kw)
+    test_data = sim.generate_dataset("test", max(n_sc // 2, 1), dur, device, **ds_kw)
 
     logger.info(f"Train: {len(train_data)}, Test: {len(test_data)}")
 

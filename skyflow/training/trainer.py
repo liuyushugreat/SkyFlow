@@ -236,8 +236,8 @@ class SkyFlowTrainer:
                 snapshot = self._to_device(snapshot)
                 labels = labels.to(self.device)
 
-                timer = LatencyTimer()
-                with timer:
+                t_gnn = LatencyTimer()
+                with t_gnn:
                     node_emb, rec_state = self.model(
                         snapshot.node_features,
                         snapshot.edge_indices,
@@ -245,13 +245,26 @@ class SkyFlowTrainer:
                         recurrent_state=rec_state,
                     )
 
-                    pairs = snapshot.conflict_pairs
-                    if pairs is None or pairs.size(1) == 0:
-                        continue
+                pairs = snapshot.conflict_pairs
+                if pairs is None or pairs.size(1) == 0:
+                    metrics.add_missed(snapshot.num_missed_positives)
+                    continue
 
+                t_score = LatencyTimer()
+                with t_score:
                     preds = self._score_pairs(snapshot, node_emb, rec_state, pairs)
 
-                metrics.update(preds, labels, latency_ms=timer.elapsed_ms)
+                stage_ms = {
+                    "graph_build": snapshot.build_time_ms,
+                    "gnn_forward": t_gnn.elapsed_ms,
+                    "pair_scoring": t_score.elapsed_ms,
+                }
+                metrics.update(
+                    preds, labels,
+                    latency_ms=t_gnn.elapsed_ms + t_score.elapsed_ms,
+                    n_missed=snapshot.num_missed_positives,
+                    stage_ms=stage_ms,
+                )
 
         return metrics.compute()
 

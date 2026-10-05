@@ -24,6 +24,7 @@ feeds the sinusoidal temporal encoding φ(δ).
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
@@ -99,6 +100,9 @@ class AirspaceState:
 
 
 DELTA_MODES = ("aoi", "legacy")
+NEIGHBOR_SEARCH_MODES = ("grid", "bruteforce")
+# Relations whose (undirected) UAV pairs form the pairwise-scoring candidate set.
+CANDIDATE_RELATIONS = ("approaches", "shares_corridor")
 
 
 @dataclass
@@ -118,6 +122,14 @@ class TKGSnapshot:
     uav_aoi: Optional[torch.Tensor] = None             # (N_uav,) age of information (s)
     relation_names: Optional[List[str]] = None
     feature_names: Optional[List[str]] = None
+    # S4: candidate pairs (i<j) that carry an approaches/shares_corridor edge
+    candidate_pairs: Optional[torch.Tensor] = None     # (2, C) long
+    # positives that are not in conflict_pairs (counted as misses by metrics)
+    num_missed_positives: int = 0
+    missed_ttc: Optional[torch.Tensor] = None          # (M,) seconds
+    # build statistics
+    build_time_ms: float = 0.0
+    num_pair_candidates: int = 0                       # pairs that went through the CPA test
 
 
 class TKGBuilder:
@@ -133,9 +145,14 @@ class TKGBuilder:
         feature_dim: Optional[int] = None,
         leakage_free: bool = True,
         delta_mode: str = "aoi",
+        neighbor_search: str = "grid",
     ):
         if delta_mode not in DELTA_MODES:
             raise ValueError(f"delta_mode must be one of {DELTA_MODES}, got {delta_mode!r}")
+        if neighbor_search not in NEIGHBOR_SEARCH_MODES:
+            raise ValueError(
+                f"neighbor_search must be one of {NEIGHBOR_SEARCH_MODES}, got {neighbor_search!r}"
+            )
         self.approach_cpa_h = approach_cpa_h
         self.approach_cpa_v = approach_cpa_v
         self.approach_lookahead = approach_lookahead
@@ -143,6 +160,8 @@ class TKGBuilder:
         self.weather_radius = weather_radius
         self.leakage_free = leakage_free
         self.delta_mode = delta_mode
+        self.neighbor_search = neighbor_search
+        self.last_num_candidates = 0
 
         self.relations = relation_vocab(leakage_free)
         self.relation_names = sorted(self.relations, key=self.relations.get)
@@ -165,6 +184,7 @@ class TKGBuilder:
         self, state: AirspaceState, device: torch.device = torch.device("cpu")
     ) -> TKGSnapshot:
         """Construct a TKG snapshot from raw airspace state."""
+        t_start = time.perf_counter()
         n_uav = state.uav_positions.shape[0]
         n_sec = state.sector_occupancy.shape[0]
         n_wx = state.weather_cells.shape[0]
@@ -178,6 +198,7 @@ class TKGBuilder:
         env_age = self._env_age(state)
         self._aoi_ctx = (uav_aoi, env_age)
         edge_indices, edge_deltas = self._build_edges(state, n_uav, n_sec, n_wx, n_rz)
+        candidate_pairs = self._candidate_pairs(edge_indices)
 
         ei_tensors = {
             self.relations[r]: torch.tensor(edges, dtype=torch.long, device=device)
@@ -200,7 +221,26 @@ class TKGBuilder:
             uav_aoi=torch.tensor(uav_aoi, dtype=torch.float32, device=device),
             relation_names=list(self.relation_names),
             feature_names=list(self.uav_features),
+            candidate_pairs=torch.tensor(candidate_pairs, dtype=torch.long, device=device),
+            build_time_ms=(time.perf_counter() - t_start) * 1000.0,
+            num_pair_candidates=self.last_num_candidates,
         )
+
+    @staticmethod
+    def _candidate_pairs(edge_indices: Dict[str, Tuple[List, List]]) -> np.ndarray:
+        """Unique undirected UAV pairs (i<j) carrying a candidate relation, sorted."""
+        src, dst = [], []
+        for r in CANDIDATE_RELATIONS:
+            if r in edge_indices:
+                src.extend(edge_indices[r][0])
+                dst.extend(edge_indices[r][1])
+        if not src:
+            return np.zeros((2, 0), dtype=np.int64)
+        a = np.asarray(src, dtype=np.int64)
+        b = np.asarray(dst, dtype=np.int64)
+        lo, hi = np.minimum(a, b), np.maximum(a, b)
+        pairs = np.unique(np.stack([lo, hi], axis=1), axis=0)   # sorted lexicographically
+        return pairs.T
 
     # ------------------------------------------------------------------ #
     # Age of information
@@ -341,41 +381,135 @@ class TKGBuilder:
         self._last_edge_times[relation][key] = t
         return delta
 
+    # ------------------------------------------------------------------ #
+    # approaches edges: candidate generation + vectorised CPA test
+    # ------------------------------------------------------------------ #
+    def candidate_radius(self, velocities: np.ndarray) -> float:
+        """Conservative horizontal radius outside of which no approaches edge
+        can exist.
+
+        The gate is cpa_h < D_appr with t_cpa ∈ [0, T].  Since
+        cpa_h ≥ h_dist − |dv_h|·t_cpa ≥ h_dist − 2·v_max·T, any pair with
+        h_dist ≥ D_appr + 2·v_max·T fails the gate.  v_max is the largest
+        observed speed in the current snapshot (the same velocities the gate
+        uses), so the bound is exact for that snapshot.
+        """
+        if velocities.shape[0] == 0:
+            return self.approach_cpa_h
+        v_max = float(np.sqrt((velocities.astype(np.float64) ** 2).sum(axis=1)).max())
+        return self.approach_cpa_h + 2.0 * v_max * self.approach_lookahead
+
+    def pair_candidates(self, positions: np.ndarray, velocities: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        """Return (ci, cj) with ci < cj, lexicographically sorted, according to
+        ``self.neighbor_search``."""
+        n = positions.shape[0]
+        if n < 2:
+            e = np.zeros(0, dtype=np.int64)
+            return e, e
+        if self.neighbor_search == "bruteforce":
+            ci, cj = np.triu_indices(n, k=1)
+            return ci.astype(np.int64), cj.astype(np.int64)
+        return self._grid_candidates(positions, self.candidate_radius(velocities))
+
+    @staticmethod
+    def _grid_candidates(positions: np.ndarray, cell: float) -> Tuple[np.ndarray, np.ndarray]:
+        """Spatial hash with cell edge = ``cell``; every pair with horizontal
+        distance < cell lies in the same or an 8-adjacent cell."""
+        cell = max(float(cell), 1e-3)
+        cx = np.floor(positions[:, 0].astype(np.float64) / cell).astype(np.int64)
+        cy = np.floor(positions[:, 1].astype(np.float64) / cell).astype(np.int64)
+        cx -= cx.min()
+        cy -= cy.min()
+        ncy = int(cy.max()) + 2
+        key = cx * ncy + cy
+        order = np.argsort(key, kind="stable")
+        key_sorted = key[order]
+        uniq, start = np.unique(key_sorted, return_index=True)
+        end = np.append(start[1:], len(key_sorted))
+        members = {int(k): order[s:e] for k, s, e in zip(uniq, start, end)}
+
+        src: List[np.ndarray] = []
+        dst: List[np.ndarray] = []
+        # Half-plane of neighbour offsets so each unordered cell pair is visited once.
+        offsets = ((1, 0), (1, 1), (0, 1), (-1, 1))
+        for k, idx in members.items():
+            if idx.size > 1:
+                a, b = np.triu_indices(idx.size, k=1)
+                src.append(idx[a])
+                dst.append(idx[b])
+            kx, ky = divmod(k, ncy)
+            for ox, oy in offsets:
+                nk = (kx + ox) * ncy + (ky + oy)
+                other = members.get(nk)
+                if other is None or ky + oy < 0 or ky + oy >= ncy:
+                    continue
+                g = np.meshgrid(idx, other, indexing="ij")
+                src.append(g[0].ravel())
+                dst.append(g[1].ravel())
+        if not src:
+            e = np.zeros(0, dtype=np.int64)
+            return e, e
+        a = np.concatenate(src).astype(np.int64)
+        b = np.concatenate(dst).astype(np.int64)
+        lo, hi = np.minimum(a, b), np.maximum(a, b)
+        n = int(positions.shape[0])
+        key = np.sort(lo * n + hi)              # lexicographic (i, j) order, as bruteforce
+        return key // n, key % n
+
+    def approach_test(
+        self, positions: np.ndarray, velocities: np.ndarray, ci: np.ndarray, cj: np.ndarray
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Vectorised linear-CPA gate for candidate pairs.
+
+        Returns (is_approach, cpa_h).  Semantics identical to the original
+        per-pair loop: closing pairs are extrapolated to CPA clipped at
+        [0, T]; non-closing pairs use their current separation."""
+        P = positions.astype(np.float32)
+        V = velocities.astype(np.float32)
+        dp = P[cj] - P[ci]
+        dv = V[cj] - V[ci]
+        h_dist = np.sqrt(dp[:, 0] ** 2 + dp[:, 1] ** 2)
+        v_dist = np.abs(dp[:, 2])
+        speed_close = dp[:, 0] * dv[:, 0] + dp[:, 1] * dv[:, 1]
+        dvdv = (dv * dv).sum(axis=1)
+        use_cpa = (speed_close < 0) & (dvdv > 1e-8)
+        t_cpa = np.where(
+            use_cpa,
+            np.clip(-(dp * dv).sum(axis=1) / np.where(dvdv > 1e-8, dvdv, 1.0), 0, self.approach_lookahead),
+            0.0,
+        ).astype(np.float32)
+        cpa_pos = dp + dv * t_cpa[:, None]
+        cpa_h = np.sqrt(cpa_pos[:, 0] ** 2 + cpa_pos[:, 1] ** 2)
+        cpa_h = np.where(use_cpa, cpa_h, h_dist)
+        is_approach = (cpa_h < self.approach_cpa_h) & (v_dist < self.approach_cpa_v)
+        return is_approach, cpa_h
+
     def _add_approach_edges(self, state, n_uav, t, edge_indices, edge_deltas):
         r_approach = "approaches"
         r_conflict = "conflicts_with" if not self.leakage_free else None
 
-        for i in range(n_uav):
-            for j in range(i + 1, n_uav):
-                dp = state.uav_positions[j] - state.uav_positions[i]
-                dv = state.uav_velocities[j] - state.uav_velocities[i]
+        P = state.uav_positions[:n_uav]
+        V = state.uav_velocities[:n_uav]
+        ci, cj = self.pair_candidates(P, V)
+        self.last_num_candidates = int(ci.size)
+        if ci.size == 0:
+            return
+        is_approach, cpa_h = self.approach_test(P, V, ci, cj)
+        hit = np.nonzero(is_approach)[0]
+        for idx in hit:
+            i, j = int(ci[idx]), int(cj[idx])
+            delta = self._edge_delta(r_approach, (i, j), t)
+            for src, dst in [(i, j), (j, i)]:
+                edge_indices[r_approach][0].append(src)
+                edge_indices[r_approach][1].append(dst)
+                edge_deltas[r_approach].append(delta)
 
-                h_dist = np.sqrt(dp[0] ** 2 + dp[1] ** 2)
-                v_dist = abs(dp[2])
-
-                speed_close = np.dot(dp[:2], dv[:2])
-                is_closing = speed_close < 0
-
-                cpa_h = h_dist
-                if is_closing and np.dot(dv, dv) > 1e-8:
-                    t_cpa = -np.dot(dp, dv) / np.dot(dv, dv)
-                    t_cpa = np.clip(t_cpa, 0, self.approach_lookahead)
-                    cpa_pos = dp + dv * t_cpa
-                    cpa_h = np.sqrt(cpa_pos[0] ** 2 + cpa_pos[1] ** 2)
-
-                if cpa_h < self.approach_cpa_h and v_dist < self.approach_cpa_v:
-                    delta = self._edge_delta(r_approach, (i, j), t)
-                    for src, dst in [(i, j), (j, i)]:
-                        edge_indices[r_approach][0].append(src)
-                        edge_indices[r_approach][1].append(dst)
-                        edge_deltas[r_approach].append(delta)
-
-                    if r_conflict is not None and cpa_h < self.approach_cpa_h * 0.3:
-                        delta_c = self._edge_delta(r_conflict, (i, j), t)
-                        for src, dst in [(i, j), (j, i)]:
-                            edge_indices[r_conflict][0].append(src)
-                            edge_indices[r_conflict][1].append(dst)
-                            edge_deltas[r_conflict].append(delta_c)
+            if r_conflict is not None and cpa_h[idx] < self.approach_cpa_h * 0.3:
+                delta_c = self._edge_delta(r_conflict, (i, j), t)
+                for src, dst in [(i, j), (j, i)]:
+                    edge_indices[r_conflict][0].append(src)
+                    edge_indices[r_conflict][1].append(dst)
+                    edge_deltas[r_conflict].append(delta_c)
 
     def _add_corridor_edges(self, state, n_uav, t, edge_indices, edge_deltas):
         r = "shares_corridor"
@@ -412,31 +546,33 @@ class TKGBuilder:
         if wx_positions is None:
             return
 
-        for i in range(n_uav):
-            for w in range(n_wx):
-                d = np.linalg.norm(state.uav_positions[i, :2] - wx_positions[w, :2])
-                if d < self.weather_radius:
-                    wx_node = wx_offset + w
-                    delta = self._env_edge_delta(r_wind, (i, wx_node), t, "weather")
-                    edge_indices[r_wind][0].append(wx_node)
-                    edge_indices[r_wind][1].append(i)
-                    edge_deltas[r_wind].append(delta)
+        d = np.linalg.norm(
+            state.uav_positions[:n_uav, None, :2] - wx_positions[None, :, :2], axis=-1
+        )                                                           # (N, n_wx)
+        for i, w in zip(*np.nonzero(d < self.weather_radius)):     # row-major: i outer
+            wx_node = wx_offset + int(w)
+            delta = self._env_edge_delta(r_wind, (int(i), wx_node), t, "weather")
+            edge_indices[r_wind][0].append(wx_node)
+            edge_indices[r_wind][1].append(int(i))
+            edge_deltas[r_wind].append(delta)
 
     def _add_restriction_edges(self, state, n_uav, n_sec, n_wx, n_rz, t, edge_indices, edge_deltas):
         r = "is_restricted_by"
         rz_offset = n_uav + n_sec + n_wx
 
-        for i in range(n_uav):
-            for z in range(n_rz):
-                rz_center = state.restricted_zones[z, :3]
-                rz_radius = state.restricted_zones[z, 3] if state.restricted_zones.shape[1] > 3 else 200.0
-                d = np.linalg.norm(state.uav_positions[i, :2] - rz_center[:2])
-                if d < rz_radius * 1.5:
-                    rz_node = rz_offset + z
-                    delta = self._env_edge_delta(r, (i, rz_node), t, "restricted")
-                    edge_indices[r][0].append(rz_node)
-                    edge_indices[r][1].append(i)
-                    edge_deltas[r].append(delta)
+        if n_rz == 0 or n_uav == 0:
+            return
+        rz = state.restricted_zones
+        radii = rz[:, 3] if rz.shape[1] > 3 else np.full(n_rz, 200.0, dtype=np.float32)
+        d = np.linalg.norm(
+            state.uav_positions[:n_uav, None, :2] - rz[None, :, :2], axis=-1
+        )                                                           # (N, n_rz)
+        for i, z in zip(*np.nonzero(d < radii[None, :] * 1.5)):
+            rz_node = rz_offset + int(z)
+            delta = self._env_edge_delta(r, (int(i), rz_node), t, "restricted")
+            edge_indices[r][0].append(rz_node)
+            edge_indices[r][1].append(int(i))
+            edge_deltas[r].append(delta)
 
     def reset(self):
         """Clear cached edge timestamps between scenarios."""

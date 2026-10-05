@@ -52,6 +52,7 @@ from skyflow.data.tkg_builder import AirspaceState, TKGBuilder, TKGSnapshot
 SPLIT_IDS = {"train": 0, "val": 1, "test": 2}
 LABEL_MODES = ("lookahead", "instantaneous")
 OBSERVATION_MODELS = ("adsb", "legacy")
+CANDIDATE_MODES = ("edges", "all", "sampled")
 CEP_TO_SIGMA = 1.0 / 1.1774          # 2-D Gaussian: CEP = 1.1774 sigma
 VERTICAL_SIGMA_FACTOR = 1.5
 
@@ -709,13 +710,24 @@ class UrbanAir500:
         device: torch.device = torch.device("cpu"),
         builder: Optional[TKGBuilder] = None,
         obs_params: Optional[ObservationParams] = None,
+        candidates: str = "edges",
     ) -> List[Tuple[TKGSnapshot, torch.Tensor]]:
         """Generate a full dataset split as list of (snapshot, labels).
 
-        Snapshots are taken every ``epoch_step`` epochs (1 Hz).  Per snapshot,
-        all positive pairs plus random negatives are sampled; ``conflict_ttc``
-        holds time-to-conflict (s) for positives and -1 for negatives.
+        Snapshots are taken every ``epoch_step`` epochs (1 Hz).  The scored
+        pair set per snapshot is controlled by ``candidates``:
+
+        * ``"edges"``   – pairs carrying an approaches/shares_corridor edge
+          (``snapshot.candidate_pairs``).  Positives outside this set are
+          recorded in ``num_missed_positives`` / ``missed_ttc`` and counted
+          as misses by the metrics.
+        * ``"all"``     – every unordered pair.
+        * ``"sampled"`` – legacy: all positives + random negatives (≤ 4N).
+
+        ``conflict_ttc`` holds time-to-conflict (s) for positives, -1 otherwise.
         """
+        if candidates not in CANDIDATE_MODES:
+            raise ValueError(f"candidates must be one of {CANDIDATE_MODES}, got {candidates!r}")
         builder = builder if builder is not None else TKGBuilder()
         dataset = []
         epoch_step = 10
@@ -737,39 +749,71 @@ class UrbanAir500:
                     continue
 
                 snapshot = builder.build(state, device=device)
-
-                conflict_map: Dict[Tuple[int, int], float] = {}
-                for c in conflicts:
-                    conflict_map[(c.uav_i, c.uav_j)] = c.time_to_conflict
-
-                n = snapshot.num_uavs
-                n_sample = min(n * 4, n * (n - 1) // 2)
-                all_pairs = [(i, j) for i in range(n) for j in range(i + 1, n)]
-
-                if len(all_pairs) > n_sample:
-                    pos_pairs = [(i, j) for i, j in all_pairs if (i, j) in conflict_map]
-                    neg_pairs = [(i, j) for i, j in all_pairs if (i, j) not in conflict_map]
-                    n_pos = len(pos_pairs)
-                    n_neg = min(len(neg_pairs), max(n_sample - n_pos, n_pos * 10))
-                    self.rng.shuffle(neg_pairs)
-                    sampled = pos_pairs + neg_pairs[:n_neg]
-                else:
-                    sampled = all_pairs
-
-                pairs_src = [i for i, _ in sampled]
-                pairs_dst = [j for _, j in sampled]
-                labels = [1.0 if (i, j) in conflict_map else 0.0 for i, j in sampled]
-                ttcs = [conflict_map.get((i, j), -1.0) for i, j in sampled]
-
-                snapshot.conflict_pairs = torch.tensor(
-                    [pairs_src, pairs_dst], dtype=torch.long, device=device
-                )
-                snapshot.conflict_labels = torch.tensor(
-                    labels, dtype=torch.float32, device=device
-                )
-                snapshot.conflict_ttc = torch.tensor(
-                    ttcs, dtype=torch.float32, device=device
-                )
+                self.attach_pair_labels(snapshot, conflicts, candidates, device)
                 dataset.append((snapshot, snapshot.conflict_labels))
 
         return dataset
+
+    def attach_pair_labels(
+        self,
+        snapshot: TKGSnapshot,
+        conflicts: List[ConflictEvent],
+        candidates: str = "edges",
+        device: torch.device = torch.device("cpu"),
+    ) -> None:
+        """Set conflict_pairs / conflict_labels / conflict_ttc (and the missed
+        positives bookkeeping) on ``snapshot`` for the chosen candidate set."""
+        n = snapshot.num_uavs
+        ttc_mat = np.full((n, n), -1.0, dtype=np.float32)
+        for c in conflicts:
+            ttc_mat[c.uav_i, c.uav_j] = c.time_to_conflict
+            ttc_mat[c.uav_j, c.uav_i] = c.time_to_conflict
+
+        if candidates == "edges":
+            cand = snapshot.candidate_pairs
+            src = cand[0].cpu().numpy() if cand is not None else np.zeros(0, np.int64)
+            dst = cand[1].cpu().numpy() if cand is not None else np.zeros(0, np.int64)
+        elif candidates == "all":
+            src, dst = np.triu_indices(n, k=1)
+        else:  # "sampled" (legacy)
+            src, dst = self._sample_pairs_legacy(n, ttc_mat)
+        src = np.asarray(src, dtype=np.int64)
+        dst = np.asarray(dst, dtype=np.int64)
+
+        ttcs = ttc_mat[src, dst] if src.size else np.zeros(0, np.float32)
+        labels = (ttcs >= 0).astype(np.float32)
+
+        # positives outside the scored set
+        pos_i, pos_j = np.nonzero(np.triu(ttc_mat >= 0, k=1))
+        if src.size:
+            covered = np.zeros((n, n), dtype=bool)
+            covered[src, dst] = True
+            covered[dst, src] = True
+            missed = ~covered[pos_i, pos_j]
+        else:
+            missed = np.ones(pos_i.size, dtype=bool)
+        missed_ttc = ttc_mat[pos_i[missed], pos_j[missed]]
+
+        snapshot.conflict_pairs = torch.tensor(np.stack([src, dst]), dtype=torch.long, device=device)
+        snapshot.conflict_labels = torch.tensor(labels, dtype=torch.float32, device=device)
+        snapshot.conflict_ttc = torch.tensor(ttcs, dtype=torch.float32, device=device)
+        snapshot.num_missed_positives = int(missed.sum())
+        snapshot.missed_ttc = torch.tensor(missed_ttc, dtype=torch.float32, device=device)
+
+    def _sample_pairs_legacy(self, n: int, ttc_mat: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        """Legacy sampling: all positives + random negatives (cap 4N, ≥10× positives)."""
+        n_sample = min(n * 4, n * (n - 1) // 2)
+        all_pairs = [(i, j) for i in range(n) for j in range(i + 1, n)]
+        if len(all_pairs) > n_sample:
+            pos_pairs = [(i, j) for i, j in all_pairs if ttc_mat[i, j] >= 0]
+            neg_pairs = [(i, j) for i, j in all_pairs if ttc_mat[i, j] < 0]
+            n_pos = len(pos_pairs)
+            n_neg = min(len(neg_pairs), max(n_sample - n_pos, n_pos * 10))
+            self.rng.shuffle(neg_pairs)
+            sampled = pos_pairs + neg_pairs[:n_neg]
+        else:
+            sampled = all_pairs
+        if not sampled:
+            return np.zeros(0, np.int64), np.zeros(0, np.int64)
+        arr = np.asarray(sampled, dtype=np.int64)
+        return arr[:, 0], arr[:, 1]

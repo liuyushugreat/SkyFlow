@@ -74,7 +74,7 @@ def main():
         "test", args.num_scenarios,
         10.0 if args.quick else 60.0,
         device,
-        builder=cfg.make_builder(),
+        **cfg.dataset_kwargs(),
     )
 
     metrics = ConflictMetrics(threshold=cfg.training.conflict_threshold)

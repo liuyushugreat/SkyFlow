@@ -61,6 +61,18 @@ class TemporalConfig:
 
 
 @dataclass
+class GraphConfig:
+    """TKG construction (S4)."""
+    neighbor_search: str = "grid"   # "grid" (spatial hash) | "bruteforce" (all pairs)
+
+
+@dataclass
+class ScoringConfig:
+    """Which UAV pairs the conflict head scores (S4)."""
+    candidates: str = "edges"       # "edges" (approaches ∪ shares_corridor) | "all" | "sampled" (legacy)
+
+
+@dataclass
 class SimConfig:
     """Observation-layer parameters of the UrbanAir-500 simulator (S3/S6).
 
@@ -94,7 +106,7 @@ class TrainingConfig:
     device: str = "auto"
 
 
-_SECTIONS = ("model", "data", "training", "features", "labels", "temporal", "sim")
+_SECTIONS = ("model", "data", "training", "features", "labels", "temporal", "sim", "graph", "scoring")
 
 
 @dataclass
@@ -106,6 +118,8 @@ class SkyFlowConfig:
     labels: LabelsConfig = field(default_factory=LabelsConfig)
     temporal: TemporalConfig = field(default_factory=TemporalConfig)
     sim: SimConfig = field(default_factory=SimConfig)
+    graph: GraphConfig = field(default_factory=GraphConfig)
+    scoring: ScoringConfig = field(default_factory=ScoringConfig)
     output_dir: str = "outputs"
 
     # ------------------------------------------------------------------ #
@@ -133,13 +147,28 @@ class SkyFlowConfig:
         temporal = getattr(self, "temporal", None)
         return temporal.delta_mode if temporal is not None else "legacy"
 
+    def candidates(self) -> str:
+        scoring = getattr(self, "scoring", None)
+        return scoring.candidates if scoring is not None else "sampled"
+
     def make_builder(self):
         from skyflow.data.tkg_builder import TKGBuilder
+        graph = getattr(self, "graph", None) or GraphConfig()
         return TKGBuilder(
             feature_dim=self.data.uav_feature_dim,
             leakage_free=self.leakage_free(),
             delta_mode=self.delta_mode(),
+            neighbor_search=graph.neighbor_search,
         )
+
+    def dataset_kwargs(self) -> dict:
+        """Keyword arguments for ``UrbanAir500.generate_dataset`` derived from
+        this config (builder, observation params, candidate set)."""
+        return {
+            "builder": self.make_builder(),
+            "obs_params": self.observation_params(),
+            "candidates": self.candidates(),
+        }
 
     def observation_params(self):
         from skyflow.data.urbanair500 import ObservationParams
@@ -182,7 +211,7 @@ class SkyFlowConfig:
     # ------------------------------------------------------------------ #
     @classmethod
     def from_yaml(cls, path: str | Path) -> "SkyFlowConfig":
-        with open(path) as f:
+        with open(path, encoding="utf-8") as f:
             raw = yaml.safe_load(f) or {}
         cfg = cls()
         for section_name in _SECTIONS:
@@ -197,5 +226,5 @@ class SkyFlowConfig:
 
     def to_yaml(self, path: str | Path) -> None:
         from dataclasses import asdict
-        with open(path, "w") as f:
+        with open(path, "w", encoding="utf-8") as f:
             yaml.dump(asdict(self), f, default_flow_style=False, sort_keys=False)

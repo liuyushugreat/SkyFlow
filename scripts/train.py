@@ -62,16 +62,16 @@ def main():
         f"(labels={cfg.label_mode()}, leakage_free={cfg.leakage_free()})..."
     )
     sim = cfg.make_simulator()
-    builder = cfg.make_builder()
+    ds_kw = cfg.dataset_kwargs()
 
     n_train = 5 if args.quick else 20
     n_val = 2 if args.quick else 5
     n_test = 2 if args.quick else 5
     duration = 10.0 if args.quick else 60.0
 
-    train_data = sim.generate_dataset("train", n_train, duration, device, builder=builder)
-    val_data = sim.generate_dataset("val", n_val, duration, device, builder=builder)
-    test_data = sim.generate_dataset("test", n_test, duration, device, builder=builder)
+    train_data = sim.generate_dataset("train", n_train, duration, device, **ds_kw)
+    val_data = sim.generate_dataset("val", n_val, duration, device, **ds_kw)
+    test_data = sim.generate_dataset("test", n_test, duration, device, **ds_kw)
 
     logger.info(f"Train: {len(train_data)} snapshots, Val: {len(val_data)}, Test: {len(test_data)}")
 

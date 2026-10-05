@@ -86,10 +86,10 @@ def main():
     # ── Step 1: Generate Data ──
     logger.info("\n[Step 1/7] Generating UrbanAir-500 benchmark data...")
     sim = cfg.make_simulator()
-    builder = cfg.make_builder()
-    train_data = sim.generate_dataset("train", n_train_scenarios, scenario_duration, device, builder=builder)
-    val_data = sim.generate_dataset("val", n_val_scenarios, scenario_duration, device, builder=builder)
-    test_data = sim.generate_dataset("test", n_test_scenarios, scenario_duration, device, builder=builder)
+    ds_kw = cfg.dataset_kwargs()
+    train_data = sim.generate_dataset("train", n_train_scenarios, scenario_duration, device, **ds_kw)
+    val_data = sim.generate_dataset("val", n_val_scenarios, scenario_duration, device, **ds_kw)
+    test_data = sim.generate_dataset("test", n_test_scenarios, scenario_duration, device, **ds_kw)
     logger.info(f"  Train: {len(train_data)} snapshots | Val: {len(val_data)} | Test: {len(test_data)}")
 
     all_results = {}
