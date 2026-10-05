@@ -108,6 +108,34 @@ def test_dataset_edges_mode_records_missed_positives():
         assert s.missed_ttc.numel() == s.num_missed_positives
 
 
+@pytest.mark.parametrize("n_uavs,grid_size,seed", [(200, 1500.0, 1), (120, 1000.0, 5), (300, 5000.0, 9)])
+def test_proximity_candidates_have_full_recall(n_uavs, grid_size, seed):
+    sim = UrbanAir500(num_uavs=n_uavs, grid_size=grid_size, seed=seed, lookahead_s=30.0,
+                      num_sectors=4, num_weather_cells=4, num_restricted_zones=1)
+    b = TKGBuilder(neighbor_search="grid")
+    data = sim.generate_dataset("val", 1, 20.0, builder=b, candidates="proximity")
+    n_pos = sum(int(s.conflict_labels.sum()) for s, _ in data)
+    n_missed = sum(s.num_missed_positives for s, _ in data)
+    assert n_pos > 0
+    assert n_missed == 0                          # recall 1 by construction
+    n_all = n_uavs * (n_uavs - 1) // 2
+    n_cand = np.mean([s.conflict_pairs.shape[1] for s, _ in data])
+    if grid_size >= 5000.0:
+        assert n_cand < 0.8 * n_all               # prunes on the paper's 5 km area
+    for s, _ in data:
+        assert bool((s.conflict_pairs[0] < s.conflict_pairs[1]).all())
+        assert s.conflict_pairs.shape[1] == len(set(map(tuple, s.conflict_pairs.T.tolist())))
+
+
+def test_proximity_with_delayed_observations_keeps_recall():
+    sim = UrbanAir500(num_uavs=200, grid_size=1500.0, seed=2, lookahead_s=30.0,
+                      adsb_latency_range=(1.0, 2.0), packet_loss=0.2,
+                      num_sectors=4, num_weather_cells=4, num_restricted_zones=1)
+    data = sim.generate_dataset("val", 1, 20.0, candidates="proximity")
+    assert sum(int(s.conflict_labels.sum()) for s, _ in data) > 0
+    assert sum(s.num_missed_positives for s, _ in data) == 0
+
+
 def test_invalid_modes_rejected():
     with pytest.raises(ValueError):
         TKGBuilder(neighbor_search="kd_tree")

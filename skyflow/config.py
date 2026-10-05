@@ -69,7 +69,11 @@ class GraphConfig:
 @dataclass
 class ScoringConfig:
     """Which UAV pairs the conflict head scores (S4)."""
-    candidates: str = "edges"       # "edges" (approaches ∪ shares_corridor) | "all" | "sampled" (legacy)
+    # "proximity" (pairs able to violate separation within the label window;
+    # recall 1 up to margin) | "edges" (approaches + shares_corridor) | "all" |
+    # "sampled" (legacy: positives + random negatives)
+    candidates: str = "proximity"
+    proximity_margin_m: float = 50.0   # slack for GPS noise / speed changes
 
 
 @dataclass
@@ -164,10 +168,12 @@ class SkyFlowConfig:
     def dataset_kwargs(self) -> dict:
         """Keyword arguments for ``UrbanAir500.generate_dataset`` derived from
         this config (builder, observation params, candidate set)."""
+        scoring = getattr(self, "scoring", None) or ScoringConfig()
         return {
             "builder": self.make_builder(),
             "obs_params": self.observation_params(),
             "candidates": self.candidates(),
+            "proximity_margin_m": scoring.proximity_margin_m,
         }
 
     def observation_params(self):

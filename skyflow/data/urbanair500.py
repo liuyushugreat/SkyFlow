@@ -52,7 +52,7 @@ from skyflow.data.tkg_builder import AirspaceState, TKGBuilder, TKGSnapshot
 SPLIT_IDS = {"train": 0, "val": 1, "test": 2}
 LABEL_MODES = ("lookahead", "instantaneous")
 OBSERVATION_MODELS = ("adsb", "legacy")
-CANDIDATE_MODES = ("edges", "all", "sampled")
+CANDIDATE_MODES = ("proximity", "edges", "all", "sampled")
 CEP_TO_SIGMA = 1.0 / 1.1774          # 2-D Gaussian: CEP = 1.1774 sigma
 VERTICAL_SIGMA_FACTOR = 1.5
 
@@ -710,25 +710,32 @@ class UrbanAir500:
         device: torch.device = torch.device("cpu"),
         builder: Optional[TKGBuilder] = None,
         obs_params: Optional[ObservationParams] = None,
-        candidates: str = "edges",
+        candidates: str = "proximity",
+        proximity_margin_m: float = 50.0,
     ) -> List[Tuple[TKGSnapshot, torch.Tensor]]:
         """Generate a full dataset split as list of (snapshot, labels).
 
         Snapshots are taken every ``epoch_step`` epochs (1 Hz).  The scored
         pair set per snapshot is controlled by ``candidates``:
 
+        * ``"proximity"`` (default) – pairs that can physically violate
+          separation within the label window given the observed speeds
+          (see :meth:`proximity_candidates`); recall 1 by construction up to
+          the stated margin.
         * ``"edges"``   – pairs carrying an approaches/shares_corridor edge
-          (``snapshot.candidate_pairs``).  Positives outside this set are
-          recorded in ``num_missed_positives`` / ``missed_ttc`` and counted
-          as misses by the metrics.
+          (``snapshot.candidate_pairs``).
         * ``"all"``     – every unordered pair.
         * ``"sampled"`` – legacy: all positives + random negatives (≤ 4N).
 
-        ``conflict_ttc`` holds time-to-conflict (s) for positives, -1 otherwise.
+        Positives outside the scored set are recorded in
+        ``num_missed_positives`` / ``missed_ttc`` and counted as misses by
+        the metrics.  ``conflict_ttc`` holds time-to-conflict (s) for
+        positives, -1 otherwise.
         """
         if candidates not in CANDIDATE_MODES:
             raise ValueError(f"candidates must be one of {CANDIDATE_MODES}, got {candidates!r}")
         builder = builder if builder is not None else TKGBuilder()
+        params = obs_params if obs_params is not None else self.obs_params
         dataset = []
         epoch_step = 10
 
@@ -749,17 +756,65 @@ class UrbanAir500:
                     continue
 
                 snapshot = builder.build(state, device=device)
-                self.attach_pair_labels(snapshot, conflicts, candidates, device)
+                self.attach_pair_labels(
+                    snapshot, conflicts, candidates, device,
+                    obs_params=params, proximity_margin_m=proximity_margin_m,
+                )
                 dataset.append((snapshot, snapshot.conflict_labels))
 
         return dataset
+
+    def proximity_candidates(
+        self,
+        snapshot: TKGSnapshot,
+        obs_params: Optional[ObservationParams] = None,
+        margin_m: float = 50.0,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Pairs that can violate (h_sep, v_sep) within the label window.
+
+        With observed speeds bounded by v_max (horizontal) and vz_max
+        (vertical), a pair whose observed separation exceeds
+
+            R_h = h_sep + 2·v_max·(W + L_max) + margin
+            R_v = v_sep + 2·vz_max·(W + L_max) + margin
+
+        cannot be in conflict during the window W (observations may be up
+        to L_max seconds stale).  ``margin`` absorbs GPS noise and speed
+        changes.  Candidates are generated with the same grid hash as the
+        graph builder, then filtered exactly.  Only applies to lookahead
+        labels; for instantaneous labels W = 0.
+        """
+        n = snapshot.num_uavs
+        if n < 2:
+            e = np.zeros(0, np.int64)
+            return e, e
+        params = obs_params if obs_params is not None else self.obs_params
+        W = self.lookahead_s if self.label_mode == "lookahead" else 0.0
+        if self.observation_model == "adsb":
+            W += params.latency_range()[1]
+        feats = snapshot.node_features[:n].detach().cpu().numpy()
+        P, V = feats[:, 0:3], feats[:, 3:6]
+        v_h = float(np.hypot(V[:, 0], V[:, 1]).max())
+        v_z = float(np.abs(V[:, 2]).max())
+        R_h = self.conflict_h_sep + 2.0 * v_h * W + margin_m
+        R_v = self.conflict_v_sep + 2.0 * v_z * W + margin_m
+
+        ci, cj = TKGBuilder._grid_candidates(P, R_h)
+        if ci.size == 0:
+            return ci, cj
+        dh = np.hypot(P[cj, 0] - P[ci, 0], P[cj, 1] - P[ci, 1])
+        dz = np.abs(P[cj, 2] - P[ci, 2])
+        keep = (dh < R_h) & (dz < R_v)
+        return ci[keep], cj[keep]
 
     def attach_pair_labels(
         self,
         snapshot: TKGSnapshot,
         conflicts: List[ConflictEvent],
-        candidates: str = "edges",
+        candidates: str = "proximity",
         device: torch.device = torch.device("cpu"),
+        obs_params: Optional[ObservationParams] = None,
+        proximity_margin_m: float = 50.0,
     ) -> None:
         """Set conflict_pairs / conflict_labels / conflict_ttc (and the missed
         positives bookkeeping) on ``snapshot`` for the chosen candidate set."""
@@ -769,7 +824,9 @@ class UrbanAir500:
             ttc_mat[c.uav_i, c.uav_j] = c.time_to_conflict
             ttc_mat[c.uav_j, c.uav_i] = c.time_to_conflict
 
-        if candidates == "edges":
+        if candidates == "proximity":
+            src, dst = self.proximity_candidates(snapshot, obs_params, proximity_margin_m)
+        elif candidates == "edges":
             cand = snapshot.candidate_pairs
             src = cand[0].cpu().numpy() if cand is not None else np.zeros(0, np.int64)
             dst = cand[1].cpu().numpy() if cand is not None else np.zeros(0, np.int64)

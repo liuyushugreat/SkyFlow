@@ -39,7 +39,8 @@ graph:
   neighbor_search: grid     # grid (spatial hash, cell = D_appr + 2*v_max*T) | bruteforce
 
 scoring:
-  candidates: edges         # edges (approaches + shares_corridor pairs) | all | sampled (legacy)
+  candidates: proximity     # proximity (pairs able to conflict within the window) | edges | all | sampled (legacy)
+  proximity_margin_m: 50.0  # slack for GPS noise / speed changes
 
 sim:
   observation_model: adsb   # adsb (latency + loss + GPS noise) | legacy (observation == truth)
