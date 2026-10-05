@@ -102,7 +102,9 @@ def main():
                     node_emb[pairs[0]], node_emb[pairs[1]],
                     rec_state[pairs[0]], rec_state[pairs[1]],
                     edge_feat=build_pair_edge_features(
-                        snapshot.node_features, pairs, snapshot.uav_aoi
+                        snapshot.node_features, pairs, snapshot.uav_aoi,
+                        mode=cfg.features.pair_edge_features,
+                        window_s=cfg.data.lookahead_seconds,
                     ),
                 )
 

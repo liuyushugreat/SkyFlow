@@ -31,7 +31,7 @@ DATA_SECTIONS = ("data", "sim", "labels", "features", "temporal", "graph", "scor
 _IGNORED_DATA_KEYS = {"cache_dir", "scenario_minutes_train", "scenario_minutes_val",
                       "scenario_minutes_test", "uav_feature_dim"}
 # model-side switches that live in a data section but do not change the cached tensors
-_IGNORED_FEATURE_KEYS = {"normalize_inputs"}   # standardisation is applied inside the model (S8)
+_IGNORED_FEATURE_KEYS = {"normalize_inputs", "pair_edge_features"}  # model-side, not part of cached data   # standardisation is applied inside the model (S8)
 
 
 def git_commit(repo: Optional[Path] = None) -> str:

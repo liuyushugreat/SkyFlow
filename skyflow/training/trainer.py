@@ -19,8 +19,8 @@ from skyflow.config import SkyFlowConfig
 from skyflow.models.tr_gat import TRGAT
 from skyflow.models.conflict_head import (
     ConflictScoringHead,
-    PAIR_EDGE_FEATURE_DIM,
     build_pair_edge_features,
+    pair_edge_feature_dim,
 )
 from skyflow.data.tkg_builder import TKGSnapshot
 from skyflow.training.io_utils import save_with_retry
@@ -110,7 +110,7 @@ class SkyFlowTrainer:
         self.head = ConflictScoringHead(
             embed_dim=mc.embed_dim,
             recurrent_dim=mc.recurrent_dim,
-            edge_feature_dim=PAIR_EDGE_FEATURE_DIM,
+            edge_feature_dim=pair_edge_feature_dim(self.cfg.features.pair_edge_features),
             dropout=mc.dropout,
         ).to(self.device)
 
@@ -464,7 +464,9 @@ class SkyFlowTrainer:
     ) -> torch.Tensor:
         """Eq. (6): score pairs with leakage-free edge features e_ij."""
         edge_feat = build_pair_edge_features(
-            snapshot.node_features, pairs, snapshot.uav_aoi
+            snapshot.node_features, pairs, snapshot.uav_aoi,
+            mode=self.cfg.features.pair_edge_features,
+            window_s=self.cfg.data.lookahead_seconds,
         )
         return self.head(
             node_emb[pairs[0]], node_emb[pairs[1]],

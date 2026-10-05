@@ -22,34 +22,97 @@ from typing import Optional
 import torch
 import torch.nn as nn
 
-PAIR_EDGE_FEATURE_DIM = 7
+PAIR_EDGE_FEATURE_DIM = 7          # "kinematics" mode (legacy TR-GAT)
+PAIR_GEOMETRY_DIM = 5              # extra dims of the "geometry" mode (S8c)
 POS_SCALE_M = 100.0
 VEL_SCALE_MPS = 10.0
 AOI_SCALE_S = 1.0
+PAIR_FEATURE_MODES = ("none", "kinematics", "geometry")
+
+
+def pair_edge_feature_dim(mode: str = "geometry") -> int:
+    """Width of e_ij for a ``features.pair_edge_features`` mode."""
+    if mode not in PAIR_FEATURE_MODES:
+        raise ValueError(f"pair_edge_features must be one of {PAIR_FEATURE_MODES}, got {mode!r}")
+    return {"none": 0, "kinematics": PAIR_EDGE_FEATURE_DIM,
+            "geometry": PAIR_EDGE_FEATURE_DIM + PAIR_GEOMETRY_DIM}[mode]
+
+
+def observed_cpa_geometry(dp_m: torch.Tensor, dv_mps: torch.Tensor, window_s: float) -> torch.Tensor:
+    """Linear-extrapolation closest-point-of-approach geometry of a pair from
+    *observed* relative position / velocity (metres, m/s) - exactly the inputs
+    of the CPA rule, no label information.
+
+    Returns (P, 5): [t_cpa / T, d_cpa_h / 100 m, |dz at t_cpa| / 10 m,
+                     |dp_h| / 100 m, closing speed / 10 m/s]."""
+    dph, dvh = dp_m[:, :2], dv_mps[:, :2]
+    v2 = (dvh * dvh).sum(-1)
+    t_cpa = torch.where(v2 > 1e-9, -(dph * dvh).sum(-1) / v2.clamp_min(1e-9), torch.zeros_like(v2))
+    t_cpa = t_cpa.clamp(0.0, float(window_s))
+    d_cpa_h = (dph + dvh * t_cpa.unsqueeze(-1)).norm(dim=-1)
+    dz_cpa = (dp_m[:, 2] + dv_mps[:, 2] * t_cpa).abs()
+    range_h = dph.norm(dim=-1)
+    closing = -(dph * dvh).sum(-1) / range_h.clamp_min(1e-6)        # > 0 when converging
+    return torch.stack([t_cpa / float(window_s), d_cpa_h / POS_SCALE_M, dz_cpa / VEL_SCALE_MPS,
+                        range_h / POS_SCALE_M, closing / VEL_SCALE_MPS], dim=-1)
 
 
 def build_pair_edge_features(
     node_features: torch.Tensor,
     pairs: torch.Tensor,
     uav_aoi: Optional[torch.Tensor] = None,
-) -> torch.Tensor:
+    mode: str = "kinematics",
+    window_s: float = 30.0,
+) -> Optional[torch.Tensor]:
     """Compute e_ij for each scored pair from observed kinematics.
 
     Args:
-        node_features: (N, D) with columns 0:3 = position, 3:6 = velocity.
+        node_features: (N, D) with columns 0:3 = position, 3:6 = velocity
+            (raw metres / m/s, i.e. *before* any model-side standardisation).
         pairs: (2, P) UAV index pairs.
         uav_aoi: (N_uav,) age of information per UAV in seconds, or None.
+        mode: "none" -> None (scorer sees node embeddings only; legacy baselines),
+              "kinematics" -> [dp/100, dv/10, delta] (7; legacy TR-GAT),
+              "geometry" -> kinematics + observed CPA geometry (12; S8c default).
+        window_s: look-ahead window for t_cpa clipping.
     Returns:
-        (P, PAIR_EDGE_FEATURE_DIM) tensor.
+        (P, pair_edge_feature_dim(mode)) tensor, or None for mode "none".
     """
+    if mode not in PAIR_FEATURE_MODES:
+        raise ValueError(f"pair_edge_features must be one of {PAIR_FEATURE_MODES}, got {mode!r}")
+    if mode == "none":
+        return None
     i, j = pairs[0], pairs[1]
-    dp = (node_features[j, 0:3] - node_features[i, 0:3]) / POS_SCALE_M
-    dv = (node_features[j, 3:6] - node_features[i, 3:6]) / VEL_SCALE_MPS
+    dp_m = node_features[j, 0:3] - node_features[i, 0:3]
+    dv_mps = node_features[j, 3:6] - node_features[i, 3:6]
     if uav_aoi is None:
         delta = torch.zeros(i.size(0), 1, device=node_features.device, dtype=node_features.dtype)
     else:
         delta = torch.maximum(uav_aoi[i], uav_aoi[j]).unsqueeze(-1) / AOI_SCALE_S
-    return torch.cat([dp, dv, delta], dim=-1)
+    parts = [dp_m / POS_SCALE_M, dv_mps / VEL_SCALE_MPS, delta]
+    if mode == "geometry":
+        parts.append(observed_cpa_geometry(dp_m, dv_mps, window_s))
+    return torch.cat(parts, dim=-1)
+
+
+def pair_scorer_input(
+    embeddings: torch.Tensor,
+    raw_node_features: torch.Tensor,
+    pairs: torch.Tensor,
+    uav_aoi: Optional[torch.Tensor],
+    mode: str,
+    window_s: float,
+) -> torch.Tensor:
+    """[h_i ‖ h_j ‖ e_ij] for the baselines' pair scorers (same e_ij as TR-GAT).
+
+    ``raw_node_features`` must be the un-standardised snapshot features
+    (metres / m/s), i.e. ``snapshot.node_features`` before any ``InputStandardizer``.
+    """
+    parts = [embeddings[pairs[0]], embeddings[pairs[1]]]
+    e = build_pair_edge_features(raw_node_features, pairs, uav_aoi, mode=mode, window_s=window_s)
+    if e is not None:
+        parts.append(e)
+    return torch.cat(parts, dim=-1)
 
 
 class ConflictScoringHead(nn.Module):

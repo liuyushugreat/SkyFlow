@@ -26,3 +26,4 @@ paper/*.synctex.gz
 paper/figs/*.aux
 paper/figs/*.log
 paper/skyflow_iscas2027.pdf
+results/main/**/*.log

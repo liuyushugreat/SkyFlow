@@ -63,6 +63,11 @@ class FeaturesConfig:
     leakage_free: bool = True       # drop d_min/t_cpa/f_avoid and conflicts_with
     input_set: str = "full"         # "full" | "telemetry_only" (S6)
     normalize_inputs: bool = True   # S8: standardise node features with train-split mean/std (False = raw, legacy)
+    # S8c: pair feature e_ij given to *every* learned scorer.
+    #   "geometry"   (default) kinematics + observed-state CPA geometry (t_cpa, d_cpa, range, closing speed)
+    #   "kinematics" [dp, dv, delta] only          (legacy TR-GAT)
+    #   "none"       no pair feature, [h_i, h_j] only (legacy baselines)
+    pair_edge_features: str = "geometry"
 
 
 @dataclass

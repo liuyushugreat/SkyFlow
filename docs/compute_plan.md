@@ -163,6 +163,31 @@ the smoke outputs; 3-epoch TR-GAT sanity on the real cache (`results/_sanity`, s
 `results/main` from the aborted launch was deleted. The schedule in §4 shifts by the restart time only
 (≈ 1.5 h); the no-rent decision is unchanged.
 
+## 8. Second restart (2026-10-05 night, pair-feature fix S8c)
+
+The S8b relaunch (21:33) trained TR-GAT for 44 epochs (seed 42, `batch_windows: 4`) and plateaued at
+val AUPRC ≈ 0.12 / best-F1 ≈ 0.21 (`logs/aborted_main_bw4_trgat_seed42.log`), i.e. **below the CPA
+rule** on the same split (test F1 0.353, AUPRC 0.133, `results/_sanity/CPA-Rule/seed42`). A diagnostic
+with `batch_windows: 1` (seed 123, `logs/sanity_bw1_trgat_seed123.log`) reached the same plateau by epoch
+12-13, so the optimiser budget is not the limit. Two protocol issues were found:
+
+1. **Unequal pair information.** TR-GAT's head received `e_ij = [Δp, Δv, δ]`, while the four learned
+   baselines scored `[h_i, h_j]` only - they never saw the relative state. Fix: a single
+   `pair_scorer_input` used by every learned method (`features.pair_edge_features`, excluded from the cache
+   key). `none` = legacy baselines, `kinematics` = legacy TR-GAT (7-d).
+2. **The head had to rediscover CPA geometry** (a division) from raw Δp/Δv under a 0.16 % positive rate.
+   Fix: mode `geometry` (default, 12-d) appends `[t_cpa/T, d_cpa_h, |dz_cpa|, range, closing speed]`
+   computed from the *observed, delayed* relative state - the same inputs the CPA rule uses, no truth or
+   label information. Every learned model thereby contains the rule as a special case; the question the
+   experiment asks becomes "what does learning add on top of the rule's decision variables".
+3. `training.batch_windows` 4 → 1 (240 optimiser steps/epoch at the same epoch time; same maths).
+
+Verification: `pytest -q` 128 passed (new `tests/test_pair_geometry_s8c.py`); 12-epoch sanity of TR-GAT
+and GAT-S with `geometry` on the real cache (`results/_sanity/geo`, `logs/sanity_geo_*.log`) before the
+relaunch. Windows "Balanced" power plan throttled the CPU to ~60 % and doubled epoch time after ~22:00;
+the "High performance" plan (`powercfg /setactive 8c5e7fda-...`) restores ~150 s/epoch - switch back
+afterwards.
+
 ## Conclusion
 
 **Do not rent: the local 4090 (2 concurrent tasks) finishes the main experiment and 3-seed ablations by about 10-07 evening even if every run goes to 150 epochs.**

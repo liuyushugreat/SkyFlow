@@ -38,6 +38,9 @@ features:
   leakage_free: true        # false reproduces the MobiHoc-submission feature set
   input_set: full           # full | telemetry_only
   normalize_inputs: true    # S8: standardise node features with train mean/std (false = raw inputs, legacy)
+  pair_edge_features: geometry  # S8c: e_ij for ALL learned scorers. geometry = [dp,dv,delta] + observed-state CPA
+                                #   geometry (t_cpa, d_cpa_h, |dz_cpa|, range, closing speed; same inputs as CPA-Rule,
+                                #   no label info). kinematics = legacy TR-GAT (7-d); none = legacy baselines ([h_i,h_j]).
 
 labels:
   mode: lookahead           # lookahead (30 s window) | instantaneous (legacy)
@@ -90,7 +93,9 @@ training:
   early_stopping_patience: 15
   min_epochs: 30            # S8: F1 stays 0 for the first epochs at 0.16% positives; do not stop before 30
   eval_every: 1
-  batch_windows: 4          # windows per optimizer step (OOM -> halve micro-batch, accumulate)
+  batch_windows: 1          # windows per optimizer step. S8c: 1 (60->240 steps/epoch at equal epoch time) reaches the
+                            #   same val plateau in ~1/3 of the epochs as 4 (logs/sanity_bw1_trgat_seed123.log vs
+                            #   logs/aborted_main_bw4_trgat_seed42.log); 4 = previous setting
   micro_batch_windows: 1    # windows per backward; 1 keeps ~8 GB instead of ~19 GB on N=500, same maths
   amp: false
   tf32: true

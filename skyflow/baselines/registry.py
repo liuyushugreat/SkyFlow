@@ -35,6 +35,14 @@ def _cpa_rule(cfg, device):
     )
 
 
+def _pair_kwargs(cfg) -> dict:
+    """S8c: every learned scorer receives the same pair feature e_ij as TR-GAT."""
+    return {
+        "pair_edge_features": cfg.features.pair_edge_features,
+        "window_s": cfg.data.lookahead_seconds,
+    }
+
+
 REGISTRY: Dict[str, BaselineSpec] = {
     "CPA-Rule": BaselineSpec(
         "CPA-Rule", _cpa_rule, True,
@@ -43,16 +51,16 @@ REGISTRY: Dict[str, BaselineSpec] = {
         "VO", lambda cfg, device: VelocityObstacle(), True,
         "Reciprocal velocity obstacle score with 60 s look-ahead."),
     "LSTM-P": BaselineSpec(
-        "LSTM-P", lambda cfg, device: LSTMPair(input_dim=cfg.uav_feature_dim()).to(device), False,
+        "LSTM-P", lambda cfg, device: LSTMPair(input_dim=cfg.uav_feature_dim(), **_pair_kwargs(cfg)).to(device), False,
         "Pairwise LSTM over node features."),
     "Tfm-P": BaselineSpec(
-        "Tfm-P", lambda cfg, device: TransformerPair(input_dim=cfg.uav_feature_dim()).to(device), False,
+        "Tfm-P", lambda cfg, device: TransformerPair(input_dim=cfg.uav_feature_dim(), **_pair_kwargs(cfg)).to(device), False,
         "Pairwise Transformer over node features."),
     "STGCN": BaselineSpec(
-        "STGCN", lambda cfg, device: STGCN(input_dim=cfg.uav_feature_dim()).to(device), False,
+        "STGCN", lambda cfg, device: STGCN(input_dim=cfg.uav_feature_dim(), **_pair_kwargs(cfg)).to(device), False,
         "Spatio-temporal GCN."),
     "GAT-S": BaselineSpec(
-        "GAT-S", lambda cfg, device: GATStatic(input_dim=cfg.uav_feature_dim()).to(device), False,
+        "GAT-S", lambda cfg, device: GATStatic(input_dim=cfg.uav_feature_dim(), **_pair_kwargs(cfg)).to(device), False,
         "Static (non-temporal) GAT."),
 }
 
