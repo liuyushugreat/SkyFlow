@@ -7,3 +7,6 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+
+# local planning doc (contains personal info)
+docs/SKYFLOW_PLAN.md
