@@ -63,11 +63,12 @@ class FeaturesConfig:
     leakage_free: bool = True       # drop d_min/t_cpa/f_avoid and conflicts_with
     input_set: str = "full"         # "full" | "telemetry_only" (S6)
     normalize_inputs: bool = True   # S8: standardise node features with train-split mean/std (False = raw, legacy)
-    # S8c: pair feature e_ij given to *every* learned scorer.
-    #   "geometry"   (default) kinematics + observed-state CPA geometry (t_cpa, d_cpa, range, closing speed)
-    #   "kinematics" [dp, dv, delta] only          (legacy TR-GAT)
-    #   "none"       no pair feature, [h_i, h_j] only (legacy baselines)
-    pair_edge_features: str = "geometry"
+    # S8c/S8d: pair feature e_ij given to *every* learned scorer.
+    #   "geometry_plan" (default) geometry + planned pair separations from the filed plans (needs plan_context)
+    #   "geometry"      kinematics + observed-state CPA geometry (t_cpa, d_cpa, range, closing speed)
+    #   "kinematics"    [dp, dv, delta] only          (legacy TR-GAT)
+    #   "none"          no pair feature, [h_i, h_j] only (legacy baselines)
+    pair_edge_features: str = "geometry_plan"
     # S8d: filed flight-plan context in the UAV features (next waypoint, planned
     # position +10/+20/+30 s along the filed route, relative to the observed
     # position). False = 20-d observation-only features (S8c reference run).

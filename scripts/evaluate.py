@@ -18,7 +18,7 @@ import torch
 
 from skyflow.config import SkyFlowConfig
 from skyflow.models.tr_gat import TRGAT
-from skyflow.models.conflict_head import ConflictScoringHead, build_pair_edge_features
+from skyflow.models.conflict_head import ConflictScoringHead, build_pair_edge_features, plan_column
 from skyflow.training.metrics import ConflictMetrics, LatencyTimer
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -105,6 +105,7 @@ def main():
                         snapshot.node_features, pairs, snapshot.uav_aoi,
                         mode=cfg.features.pair_edge_features,
                         window_s=cfg.data.lookahead_seconds,
+                        plan_col0=plan_column(getattr(snapshot, "feature_names", None)),
                     ),
                 )
 

@@ -21,6 +21,7 @@ from skyflow.models.conflict_head import (
     ConflictScoringHead,
     build_pair_edge_features,
     pair_edge_feature_dim,
+    plan_column,
 )
 from skyflow.data.tkg_builder import TKGSnapshot
 from skyflow.training.io_utils import save_with_retry
@@ -467,6 +468,7 @@ class SkyFlowTrainer:
             snapshot.node_features, pairs, snapshot.uav_aoi,
             mode=self.cfg.features.pair_edge_features,
             window_s=self.cfg.data.lookahead_seconds,
+            plan_col0=plan_column(getattr(snapshot, "feature_names", None)),
         )
         return self.head(
             node_emb[pairs[0]], node_emb[pairs[1]],

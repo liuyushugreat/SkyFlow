@@ -109,9 +109,10 @@ class TestModes:
         assert torch.allclose(g[:, :7], k)          # geometry is a superset of kinematics
         assert k[0, 6].item() == pytest.approx(1.5)
 
-    def test_default_config_is_geometry_and_legacy_modes_exist(self):
+    def test_default_config_is_geometry_plan_and_legacy_modes_exist(self):
         cfg = SkyFlowConfig()
-        assert cfg.features.pair_edge_features == "geometry"
+        assert cfg.features.pair_edge_features == "geometry_plan"
+        assert pair_edge_feature_dim("geometry_plan") == 20
         cfg.features.pair_edge_features = "none"
         assert pair_edge_feature_dim(cfg.features.pair_edge_features) == 0
 
@@ -166,7 +167,7 @@ class TestLearnedScorersReceivePairFeatures:
     def test_trgat_head_width_follows_config(self):
         from skyflow.training.trainer import SkyFlowTrainer
         cfg = SkyFlowConfig()
-        for mode, dim in (("none", 0), ("kinematics", 7), ("geometry", 12)):
+        for mode, dim in (("none", 0), ("kinematics", 7), ("geometry", 12), ("geometry_plan", 20)):
             cfg.features.pair_edge_features = mode
             tr = SkyFlowTrainer(cfg, device=torch.device("cpu"))
             tr.build_model()

@@ -14,7 +14,7 @@ import torch
 import torch.nn as nn
 
 from skyflow.data.tkg_builder import TKGSnapshot
-from skyflow.models.conflict_head import pair_edge_feature_dim, pair_scorer_input
+from skyflow.models.conflict_head import pair_edge_feature_dim, pair_scorer_input, plan_column
 from skyflow.models.input_norm import InputStandardizer
 
 
@@ -75,7 +75,8 @@ class TransformerPair(nn.Module):
             return torch.zeros(0, device=feats.device)
 
         x = pair_scorer_input(embeddings, snapshot.node_features, pairs, snapshot.uav_aoi,
-                              self.pair_edge_features, self.window_s)
+                              self.pair_edge_features, self.window_s,
+                              plan_col0=plan_column(getattr(snapshot, "feature_names", None)))
         return torch.sigmoid(self.scorer(x)).squeeze(-1)
 
     def count_parameters(self) -> int:

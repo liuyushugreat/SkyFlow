@@ -188,6 +188,43 @@ relaunch. Windows "Balanced" power plan throttled the CPU to ~60 % and doubled e
 the "High performance" plan (`powercfg /setactive 8c5e7fda-...`) restores ~150 s/epoch - switch back
 afterwards.
 
+## 9. Third restart (2026-10-06 morning, plan context S8d)
+
+The S8c relaunch (00:06) completed TR-GAT, TR-GAT-NT, GAT-S, STGCN and LSTM-P (3 seeds each; archived
+under `results/archive/main_noplan_s8c`, not committed). Under the leakage-free protocol **every learned
+model tied the CPA rule** (test F1 0.34-0.36 vs 0.353; CDR ≈ 0.32-0.34 for all), and the per-regime
+breakdown showed why: CDR ≈ 0.51-0.53 for conflicts with TTC ≤ 15 s but only 0.15-0.19 for TTC > 15 s,
+even for *planned* crossings. The labels come from the true 6-DoF future including waypoint turns, while
+the 20 observation-only features contain no route information, so conflicts beyond the straight-line
+horizon are invisible to rule and model alike - a data ceiling, not a model limit.
+
+Fix (user decision, option A): `features.plan_context: true` adds 12 features of **filed flight-plan
+context** per UAV - next filed waypoint and planned positions +10/+20/+30 s along the filed route,
+relative to the observed position - computed from the filed plan and the *observed* state only (zero for
+non-cooperative UAVs). This is information a UTM node legitimately holds; non-conforming aircraft carry a
+plan that disagrees with their telemetry. Two consequences for the protocol: a plan-aware rule baseline
+`Plan-CPA` (same interval test on the filed polyline) and an ablation `abl_no_plan` (= the S8c setting).
+Implementation notes: the simulator moves every UAV from t = 0 (`start_time` only gates steering), so no
+departure delay is modelled; the active route segment is the nearest one whose target waypoint is ahead of
+the observed heading (handles overshoot loops at waypoints and hub revisits). On a 200-UAV check the plan
+projection error at +30 s is 26 m median / 115 m P90 versus 82 m / 541 m for linear extrapolation.
+
+Cache keys change (features section): train `c3c0ab967d551f33`, val `787283698c56ea4f`, test
+`05d90a3003363c93` (`logs/build_cache_s8d_*.log`). `pytest -q` 139 passed (new
+`tests/test_plan_context_s8d.py`). Compute: 6 learned methods x 3 seeds + 5 ablations x 3 seeds, two
+concurrent on the 4090 at ≈ 110 s/epoch with early stopping around epoch 35-60 → ≈ 20-24 h total.
+
+**Second correction before relaunch (09:07 → 09:35).** The first S8d chain showed TR-GAT val AUPRC 0.168
+at epoch 8 - identical to the no-plan run. The plan context entered only as *per-node* features, so the
+pair head still had to combine two 12-d route vectors to infer whether the *planned* trajectories cross,
+while Plan-CPA gets that quantity directly. New pair mode `features.pair_edge_features: geometry_plan`
+(default, 20-d) appends to the S8c geometry the planned horizontal/vertical separation of the pair at
++10/+20/+30 s, the planned minimum horizontal separation and a no-plan flag (observed-velocity fallback for
+UAVs without a plan). Same inputs as Plan-CPA, no truth. `abl_no_plan` now switches both `plan_context`
+and the pair mode back to the S8c setting. Not in the cache key (pair features are computed on the fly), so
+the caches above are reused; `pytest -q` 143 passed; smoke run of TR-GAT, GAT-S and `abl_no_plan` on
+`configs/smoke.yaml` OK. The chain was relaunched with `--resume` (CPA-Rule and Plan-CPA seed 42 kept).
+
 ## Conclusion
 
 **Do not rent: the local 4090 (2 concurrent tasks) finishes the main experiment and 3-seed ablations by about 10-07 evening even if every run goes to 150 epochs.**

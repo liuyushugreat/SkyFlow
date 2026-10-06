@@ -43,6 +43,14 @@ def _set(path: str, value):
     return f
 
 
+def _chain(*fns):
+    def f(cfg: SkyFlowConfig) -> SkyFlowConfig:
+        for g in fns:
+            cfg = g(cfg)
+        return cfg
+    return f
+
+
 METHODS: Dict[str, MethodSpec] = {
     # ---- main comparison --------------------------------------------------
     "TR-GAT": MethodSpec("TR-GAT", "trgat", _identity, group="main",
@@ -68,8 +76,10 @@ METHODS: Dict[str, MethodSpec] = {
     "abl_telemetry_only": MethodSpec("abl_telemetry_only", "trgat", _set("features.input_set", "telemetry_only"),
                                      group="ablation",
                                      description="UAV nodes + approaches edges only (no context streams)."),
-    "abl_no_plan": MethodSpec("abl_no_plan", "trgat", _set("features.plan_context", False), group="ablation",
-                              description="Observation-only UAV features (no filed-plan context)."),
+    "abl_no_plan": MethodSpec("abl_no_plan", "trgat", _chain(_set("features.plan_context", False),
+                                                             _set("features.pair_edge_features", "geometry")),
+                              group="ablation",
+                              description="Observation-only UAV and pair features (no filed-plan context; = S8c setting)."),
     # abl_no_temporal == TR-GAT-NT (reused, not re-run)
 }
 

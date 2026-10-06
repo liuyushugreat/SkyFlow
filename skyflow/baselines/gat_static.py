@@ -15,7 +15,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from skyflow.data.tkg_builder import TKGSnapshot
-from skyflow.models.conflict_head import pair_edge_feature_dim, pair_scorer_input
+from skyflow.models.conflict_head import pair_edge_feature_dim, pair_scorer_input, plan_column
 from skyflow.models.input_norm import InputStandardizer
 
 
@@ -132,7 +132,8 @@ class GATStatic(nn.Module):
             return torch.zeros(0, device=x.device)
 
         inp = pair_scorer_input(x_uav, snapshot.node_features, pairs, snapshot.uav_aoi,
-                                self.pair_edge_features, self.window_s)
+                                self.pair_edge_features, self.window_s,
+                              plan_col0=plan_column(getattr(snapshot, "feature_names", None)))
         return torch.sigmoid(self.scorer(inp)).squeeze(-1)
 
     def _merge_edges(self, edge_indices: Dict[int, torch.Tensor]) -> tuple:

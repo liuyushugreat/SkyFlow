@@ -27,6 +27,7 @@ from skyflow.baselines.registry import REGISTRY
 from skyflow.config import SkyFlowConfig
 from skyflow.data.cache import data_signature
 from skyflow.data.tkg_builder import PLAN_CONTEXT_FEATURES, TKGBuilder, TKGSnapshot, uav_feature_names
+from skyflow.models.conflict_head import build_pair_edge_features, plan_column
 from skyflow.data.urbanair500 import (
     CAUSE_CODES, TruthLog, UAVFlightPlan, UrbanAir500, filed_plan_context, pack_filed_plans,
 )
@@ -135,6 +136,67 @@ def _snapshot_from(pos, vel, plan_ctx):
         conflict_pairs=torch.tensor([[0], [1]]),
         feature_names=uav_feature_names(True, True),
     )
+
+
+class TestPlannedPairGeometry:
+    def _two(self):
+        # UAV0 at origin, plan: +x 100 m per 10 s; UAV1 at (300, 0, 50) hovering, plan: -x 100 m per 10 s
+        pos = np.array([[0.0, 0.0, 50.0], [300.0, 0.0, 52.0]])
+        vel = np.array([[10.0, 0.0, 0.0], [-10.0, 0.0, 0.0]])
+        ctx = np.zeros((2, 12))
+        for k in range(3):
+            ctx[0, 3 + 3 * k: 6 + 3 * k] = [100.0 * (k + 1), 0.0, 0.0]
+            ctx[1, 3 + 3 * k: 6 + 3 * k] = [-100.0 * (k + 1), 0.0, 0.0]
+        return pos, vel, ctx
+
+    def test_planned_separations(self):
+        pos, vel, ctx = self._two()
+        snap = _snapshot_from(pos, vel, ctx)
+        e = build_pair_edge_features(snap.node_features, snap.conflict_pairs, None, mode="geometry_plan",
+                                     plan_col0=plan_column(snap.feature_names))
+        assert e.shape == (1, 20)
+        g = e[0, 12:]
+        # planned horizontal separation: 300 -> 100 (+10 s) -> 100 (+20 s, crossed) -> 300 (+30 s)
+        assert g[0].item() == pytest.approx(1.0)       # +10 s: |300-200| = 100 m
+        assert g[2].item() == pytest.approx(1.0)       # +20 s: |-100| = 100 m
+        assert g[4].item() == pytest.approx(3.0)       # +30 s: 300 m
+        assert g[1].item() == pytest.approx(0.2)       # dz 2 m / 10
+        assert g[6].item() == pytest.approx(1.0)       # min planned horizontal separation
+        assert g[7].item() == 0.0                      # both have plans
+
+    def test_no_plan_fallback_and_flag(self):
+        pos, vel, ctx = self._two()
+        ctx[1] = 0.0                                   # UAV1: no plan context (non-cooperative)
+        snap = _snapshot_from(pos, vel, ctx)
+        e = build_pair_edge_features(snap.node_features, snap.conflict_pairs, None, mode="geometry_plan",
+                                     plan_col0=plan_column(snap.feature_names))
+        g = e[0, 12:]
+        assert g[7].item() == 1.0
+        # fallback uses observed velocity (-10 m/s) -> same planned separations as before
+        assert g[0].item() == pytest.approx(1.0) and g[4].item() == pytest.approx(3.0)
+
+    def test_geometry_plan_requires_plan_columns(self):
+        pos, vel, ctx = self._two()
+        snap = _snapshot_from(pos, vel, ctx)
+        with pytest.raises(ValueError):
+            build_pair_edge_features(snap.node_features, snap.conflict_pairs, None, mode="geometry_plan")
+        # and the ablation config switches both the UAV features and the pair mode off
+        from skyflow.experiments.methods import method_config
+        cfg = method_config("abl_no_plan", SkyFlowConfig())
+        assert cfg.features.plan_context is False and cfg.features.pair_edge_features == "geometry"
+        assert cfg.uav_feature_dim() == 20
+
+    def test_learned_scorers_run_with_geometry_plan(self):
+        sim = UrbanAir500(num_uavs=20, grid_size=600.0, seed=5)
+        log = sim.run_physics(sim.generate_flight_plans(20), 1.0, extra_seconds=30.0)
+        snap = TKGBuilder().build(sim.observe(log, 5))
+        snap.conflict_pairs = snap.candidate_pairs
+        from skyflow.baselines.gat_static import GATStatic
+        from skyflow.baselines.lstm_pair import LSTMPair
+        for cls in (GATStatic, LSTMPair):
+            m = cls(input_dim=32, pair_edge_features="geometry_plan"); m.eval()
+            out = m(snap)
+            assert out.shape == (snap.conflict_pairs.size(1),) and torch.isfinite(out).all()
 
 
 class TestPlanCPARule:
