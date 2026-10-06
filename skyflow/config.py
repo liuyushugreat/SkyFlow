@@ -10,8 +10,8 @@ from typing import Dict, List, Optional
 
 @dataclass
 class ModelConfig:
-    num_layers: int = 4
-    embed_dim: int = 128
+    num_layers: int = 2             # S8e: L=2, d=64 selected on the validation split against L=4, d=128
+    embed_dim: int = 64             #      (0.23 M parameters, capacity-matched to the GAT-S baseline)
     num_heads: int = 4
     temporal_dim: int = 32
     recurrent_dim: int = 64

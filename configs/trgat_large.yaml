@@ -1,6 +1,7 @@
+# S8e: the larger capacity rejected in the validation-only selection (seed 42): identical to default.yaml except L=4, d=128.
 model:
-  num_layers: 2             # S8e: selected on the validation split (seed 42) against L=4/d=128
-  embed_dim: 64
+  num_layers: 4
+  embed_dim: 128
   num_heads: 4
   temporal_dim: 32
   recurrent_dim: 64
