@@ -49,13 +49,14 @@ def host_check(runs, allow_mixed):
         for s, r in by_seed.items():
             src = r["_eval"]["env"] if r["_eval"] else r["env"]
             hosts.add((src.get("hostname"), src.get("gpu_model")))
+    hosts_sorted = sorted(hosts, key=str)      # entries may contain None (e.g. CPU-only rule runs)
     if len(hosts) > 1:
-        msg = f"latency data come from different machines/GPUs: {sorted(hosts)}"
+        msg = f"latency data come from different machines/GPUs: {hosts_sorted}"
         if not allow_mixed:
             raise SystemExit("ERROR: " + msg + "  (re-run eval_only.py on one machine, or --allow_mixed_hosts)")
         print("WARNING: " + msg + " -> latency columns dropped")
-        return None, sorted(hosts)
-    return next(iter(hosts)) if hosts else (None, None), sorted(hosts)
+        return None, hosts_sorted
+    return next(iter(hosts)) if hosts else (None, None), hosts_sorted
 
 
 def latency_of(r):
