@@ -42,8 +42,10 @@ def collect(trainer, data, layers):
     model.eval()
     K = trainer.cfg.data.observation_window
     acc = defaultdict(lambda: ([], [], [], []))
-    for window in trainer._group_into_windows(data, K):
-        state = None
+    state = None
+    for window, reset in trainer._window_schedule(data, K):      # honours training.state_carry (S8g)
+        if reset:
+            state = None
         for snapshot, _ in window:
             snapshot = trainer._to_device(snapshot)
             _, state = model(snapshot.node_features, snapshot.edge_indices, snapshot.edge_deltas, recurrent_state=state)

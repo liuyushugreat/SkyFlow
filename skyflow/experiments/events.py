@@ -31,6 +31,7 @@ import numpy as np
 import torch
 
 from skyflow.data.urbanair500 import CAUSES
+from skyflow.training.windows import scenario_length, window_index_groups, window_sequences  # noqa: F401
 
 
 @dataclass
@@ -45,14 +46,14 @@ class SnapshotScores:
     num_uavs: int
 
 
-def window_index_groups(n: int, K: int) -> List[List[int]]:
-    """Same grouping as SkyFlowTrainer._group_into_windows, on indices."""
-    groups = [list(range(s, s + K)) for s in range(0, n - K + 1, K)]
-    if n >= K and n % K != 0:
-        groups.append(list(range(n - K, n)))
-    if not groups and n:
-        groups.append(list(range(n)))
-    return groups
+def trgat_schedule(tr, n: int):
+    """(indices, reset_state) per window for a TR-GAT trainer, honouring
+    ``training.state_carry`` exactly as ``SkyFlowTrainer.evaluate``."""
+    K = tr.cfg.data.observation_window
+    carry = str(getattr(tr.cfg.training, "state_carry", "window"))
+    for seq in window_sequences(n, K, scenario_length(tr.cfg), carry):
+        for w, idx in enumerate(seq):
+            yield idx, w == 0
 
 
 def _np(t: Optional[torch.Tensor], dtype, size: int):
@@ -63,16 +64,17 @@ def _np(t: Optional[torch.Tensor], dtype, size: int):
 
 @torch.no_grad()
 def iter_scores(lm, data) -> Iterator[SnapshotScores]:
-    """Yield per-snapshot scores of a LoadedMethod (TR-GAT family keeps the
-    GRU state across each K-window exactly as ``SkyFlowTrainer.evaluate``).
+    """Yield per-snapshot scores of a LoadedMethod (TR-GAT family carries the
+    GRU state over windows / scenarios exactly as ``SkyFlowTrainer.evaluate``).
     Snapshots that appear twice (overlapping last window) are yielded once."""
     if lm.kind == "trgat":
         tr = lm.trainer
         tr.model.eval(); tr.head.eval()
-        K = tr.cfg.data.observation_window
         seen = set()
-        for group in window_index_groups(len(data), K):
-            state = None
+        state = None
+        for group, reset in trgat_schedule(tr, len(data)):
+            if reset:
+                state = None
             for idx in group:
                 snapshot, labels = data[idx]
                 snapshot = tr._to_device(snapshot)

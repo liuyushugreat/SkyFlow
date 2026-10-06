@@ -28,6 +28,7 @@ from skyflow.data.tkg_builder import TKGSnapshot
 from skyflow.training.io_utils import save_with_retry
 from skyflow.training.losses import FocalLoss, build_loss
 from skyflow.training.metrics import ConflictMetrics, LatencyTimer, MetricResult
+from skyflow.training.windows import scenario_length, window_sequences
 
 logger = logging.getLogger(__name__)
 
@@ -153,6 +154,23 @@ class SkyFlowTrainer:
             windows.append(data)
         return windows
 
+    def _window_schedule(self, data, K: int, shuffle: bool = False):
+        """Windows in processing order as (window, reset_state) pairs.
+
+        S8g ``training.state_carry``: "window" resets the GRU state at every
+        window (every pair has reset_state=True); "scenario" keeps the windows
+        of a scenario in time order and resets only at the first one.  With
+        ``shuffle`` the *sequences* are shuffled, never the windows inside."""
+        carry = str(getattr(self.cfg.training, "state_carry", "window"))
+        seqs = window_sequences(len(data), K, scenario_length(self.cfg), carry)
+        if shuffle:
+            np.random.shuffle(seqs)        # same RNG draws as the pre-S8g window shuffle in "window" mode
+        schedule = []
+        for seq in seqs:
+            for w, idx in enumerate(seq):
+                schedule.append(([data[i] for i in idx], w == 0))
+        return schedule
+
     def train(
         self,
         train_data: List[Tuple[TKGSnapshot, torch.Tensor]],
@@ -217,8 +235,8 @@ class SkyFlowTrainer:
                 "config": self.cfg,
             }, ckpt_path)
 
-        def _window_loss(window) -> Tuple[torch.Tensor, int]:
-            rec_state = None
+        def _window_loss(window, rec_state=None) -> Tuple[torch.Tensor, int, Optional[torch.Tensor]]:
+            # rec_state: carried-in state (S8g "scenario" mode; already detached) or None
             loss = 0.0
             valid = 0
             for snapshot, labels in window:
@@ -240,7 +258,7 @@ class SkyFlowTrainer:
                 valid += 1
                 if detach_state:
                     rec_state = rec_state.detach()
-            return loss, valid
+            return loss, valid, (rec_state.detach() if rec_state is not None else None)
 
         t_start = time.perf_counter()
         epochs_run = 0
@@ -253,13 +271,15 @@ class SkyFlowTrainer:
             n_steps = 0
             t_epoch = time.perf_counter()
 
-            windows = self._group_into_windows(train_data, K)
-            np.random.shuffle(windows)
+            schedule = self._window_schedule(train_data, K, shuffle=True)
+            carried = None                      # GRU state carried across windows (S8g "scenario" mode)
 
-            for g in range(0, len(windows), batch_windows):
-                group = windows[g:g + batch_windows]
+            for g in range(0, len(schedule), batch_windows):
+                group = schedule[g:g + batch_windows]
+                carried_at_group_start = carried
                 while True:
                     try:
+                        carried = carried_at_group_start
                         optimizer.zero_grad(set_to_none=True)
                         group_loss = 0.0
                         n_valid_windows = 0
@@ -267,8 +287,8 @@ class SkyFlowTrainer:
                             micro = group[m:m + self.micro_batch]
                             micro_loss = 0.0
                             micro_valid = 0
-                            for window in micro:
-                                wl, valid = _window_loss(window)
+                            for window, reset in micro:
+                                wl, valid, carried = _window_loss(window, None if reset else carried)
                                 if valid > 0:
                                     micro_loss = micro_loss + wl / valid
                                     micro_valid += 1
@@ -377,9 +397,10 @@ class SkyFlowTrainer:
         metrics = ConflictMetrics(threshold=thr,
                                   regime_ttc_boundary_s=getattr(tc, "regime_ttc_boundary_s", 15.0))
 
-        windows = self._group_into_windows(data, K)
-        for window in windows:
-            rec_state = None
+        rec_state = None
+        for window, reset in self._window_schedule(data, K):
+            if reset:
+                rec_state = None
             for snapshot, labels in window:
                 snapshot = self._to_device(snapshot)
                 labels = labels.to(self.device)

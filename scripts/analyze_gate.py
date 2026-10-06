@@ -43,8 +43,10 @@ def collect(trainer, data):
     model.eval(); head.eval()
     K = trainer.cfg.data.observation_window
     groups = defaultdict(list)
-    for window in trainer._group_into_windows(data, K):
-        state = None
+    state = None
+    for window, reset in trainer._window_schedule(data, K):      # honours training.state_carry (S8g)
+        if reset:
+            state = None
         for snapshot, labels in window:
             snapshot = trainer._to_device(snapshot)
             emb, state = model(snapshot.node_features, snapshot.edge_indices, snapshot.edge_deltas,

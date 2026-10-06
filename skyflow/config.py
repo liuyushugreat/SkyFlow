@@ -165,6 +165,8 @@ class TrainingConfig:
     scheduler: str = "warmup_cosine"  # S8e: same schedule for TR-GAT and every learned baseline ("none" = constant lr)
     tbptt_detach: bool = False      # S8e: False = back-propagate through the GRU state over the K-snapshot window;
                                     #      True = legacy (state detached after every snapshot)
+    state_carry: str = "window"     # S8g: "window" = GRU state reset at every K-snapshot window (S8e and earlier);
+                                    #      "scenario" = state carried (detached) across the windows of a scenario
     seed: int = 42
     num_seeds: int = 5
     seeds: List[int] = field(default_factory=lambda: [42, 123, 456, 789, 1024])

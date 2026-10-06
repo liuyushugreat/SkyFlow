@@ -368,6 +368,59 @@ Results prose to the confirmed claims only (-0.2 col), drop the per-cause senten
 shorten the robustness sentence to TR-GAT / TR-GAT-NT / CPA-Rule, Eq. (2) to one line; last resort: drop
 the hard-regime sentence or two ablation rows from the prose (the table keeps them).
 
+## 12. S8g: what the finished runs say, and the state-carry variant (10-07 morning)
+
+Main comparison finished 10-07 02:32 (`results/main`, 3 seeds each; `stdout.log` TEST lines):
+
+| method | test F1 (3 seeds) | CDR | FAR |
+|---|---|---|---|
+| TR-GAT | 0.4164 +- 0.0015 | 0.469 | 0.626 |
+| TR-GAT-NT | 0.4165 +- 0.0004 | 0.469 | 0.625 |
+| GAT-S | 0.4149 +- 0.0008 | 0.424 | 0.593 |
+| STGCN | 0.4203 +- 0.0017 | 0.439 | 0.597 |
+| LSTM-P | 0.4261 +- 0.0007 | 0.456 | 0.600 |
+| Tfm-P | 0.4229 +- 0.0006 | 0.464 | 0.612 |
+| Plan-CPA / CPA-Rule / VO (1 run) | 0.382 / 0.363 / 0.165 | | |
+
+Partial S15 on the first three learned methods (`results/_events_partial`, `results/_robust_partial`, evaluation
+only, no training): at a fixed validation budget the event-level CDR of TR-GAT, GAT-S and STGCN agree within
+1 pt; TR-GAT leads only in timely CDR at 50 false episodes/UAV-h (0.551 +- 0.011 vs 0.518 / 0.515) with a longer
+median lead (19.4 s vs 16 s).  Beyond the training latency range TR-GAT degrades *faster* than GAT-S/STGCN
+(F1 0.194 vs 0.250 at 3.0 s); packet loss up to 0.5 costs every method < 0.3 pt.
+
+Reading: all learned pair scorers sit on the same plateau (0.415-0.426); the architecture contributes nothing
+measurable on top of the shared e_ij, and the recurrence over a 10-snapshot (10 s) window does not help
+(TR-GAT-NT = TR-GAT; abl_no_gru pending).  The user chose to try one model change (option B) before deciding
+the paper's framing.
+
+### 12.1 Variant: recurrent state carried over the scenario (`training.state_carry`)
+
+The GRU state was reset at every K=10 window in training *and* evaluation, i.e. 10 s of memory.  S8g adds
+`training.state_carry = "window" | "scenario"`: in "scenario" mode the windows of a scenario are processed in
+time order, the state is carried across them (detached, truncated BPTT per window), and reset only at the first
+snapshot of a scenario - the same schedule in `SkyFlowTrainer.train/evaluate`, `events.iter_scores` and the two
+analysis scripts.  Default stays "window" (reproduces every S8e run bit-for-bit, including the RNG draws of the
+window shuffle); method `TR-GAT-SC` switches it on.  Tests: `tests/test_state_carry_s8g.py` (11).
+
+Cost: none at inference (same per-snapshot work), no cache change.  Expected effect: honest uncertainty - longer
+memory can only help the conformance gate and the per-UAV state (wind drift / non-conforming trends accumulate
+over tens of seconds); the OOD-latency degradation may get worse.
+
+### 12.2 Chain restructuring
+
+The S8e driver was stopped at 07:03 (its two `abl_no_gru` children s42/s456 were left running); the first version
+of the S8g edit was imported by `abl_no_gru/seed123` before the trainer import line landed -> NameError at start;
+that seed is re-queued.  `chain_s8g.ps1` (Temp) waits for the two children, then runs
+`TR-GAT-SC` (3 seeds, first in the queue) + the remaining ablations with `--resume`, then S15, paper build,
+Balanced power plan.  A first 3-concurrent probe was killed: at 23.9/24.5 GB the epoch time went from ~90 s to
+590 s.
+
+Decision rule for B (after `TR-GAT-SC/seed42`): compare val best-F1 / test F1 / event-level timely CDR with
+`TR-GAT/seed42`.  If not clearly better (> 1 pt F1 or > 3 pt timely CDR, consistent on seeds 123/456), keep the
+S8e model as TR-GAT and reframe the paper around the leakage-free benchmark + event-level/budget protocol +
+operational layer; otherwise make "scenario" the default, re-run the ablations on it and treat the "window"
+runs as the ablation `abl_state_window`.
+
 ## Conclusion
 
 **Do not rent: the local 4090 (2 concurrent tasks) finishes the main experiment and 3-seed ablations by about 10-07 evening even if every run goes to 150 epochs.**

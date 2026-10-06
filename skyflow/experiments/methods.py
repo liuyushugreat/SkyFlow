@@ -66,6 +66,10 @@ METHODS: Dict[str, MethodSpec] = {
     "Plan-CPA": MethodSpec("Plan-CPA", "rule", _identity, baseline_name="Plan-CPA", group="main",
                            description="CPA interval test along the filed-plan polyline (S8d)."),
     "VO": MethodSpec("VO", "rule", _identity, baseline_name="VO", group="main"),
+    # ---- S8g variant: recurrent state carried across the windows of a scenario
+    "TR-GAT-SC": MethodSpec("TR-GAT-SC", "trgat", _set("training.state_carry", "scenario"), group="variant",
+                            description="GRU state carried (truncated BPTT per window) over the whole scenario "
+                                        "instead of being reset every K snapshots."),
     # ---- ablations (TR-GAT variants) ---------------------------------------
     "abl_no_gating": MethodSpec("abl_no_gating", "trgat", _set("model.use_gating", False), group="ablation",
                                 description="Uniform relation average instead of learned gate g_r."),
