@@ -1,4 +1,4 @@
-"""S16: paper figures, generated only from results/ CSV/JSON (no numbers typed by hand).
+﻿"""S16: paper figures, generated only from results/ CSV/JSON (no numbers typed by hand).
 
     python scripts/make_figures.py --results_dir results --out_dir paper/figs
 
@@ -7,6 +7,7 @@ Outputs (PDF, single-column 3.5 in, 8 pt, TrueType fonts - no Type 3):
   fig_scaling.pdf       log-log P95 latency (total + 3 stages) vs N, fitted alpha, 200 ms budget line
   fig_attention_aoi.pdf in-degree-normalised attention vs AoI delta, one line per relation
   fig_lead.pdf          fraction of conflict events alerted with >= x s lead (event-level, S8f)
+  fig_soc.pdf           SOC curve: event CDR vs false alert episodes per UAV-hour, raw and with the operational layer
 """
 
 import argparse
@@ -183,6 +184,68 @@ def fig_lead(npz, events_csv, methods, out, persistence=1):
     return meta
 
 
+# --------------------------------------------------------------------------- SOC curve (S8f)
+def fig_soc(soc_csv, events_csv, budget_csv, methods, out, layer_method="TR-GAT"):
+    """System Operating Characteristic on the test split: event CDR versus
+    false alert episodes per UAV-hour (log axis).  Solid: raw scores (alpha=1,
+    no hysteresis), seeds averaged per threshold; dotted: the operational
+    layer (EMA + hysteresis) of ``layer_method`` with the setting selected on
+    validation for the matched budget; markers: validation-F1 operating
+    points; rules are single points."""
+    if not soc_csv.exists():
+        print("[skip] no events_soc.csv"); return None
+    d = pd.read_csv(soc_csv)
+    d = d[d["split"] == "test"]
+    ev = pd.read_csv(events_csv) if events_csv.exists() else None
+    bud = pd.read_csv(budget_csv) if budget_csv.exists() else None
+    fig, ax = plt.subplots(figsize=(COL_W, 1.9))
+    meta = {}
+    for m in methods:
+        dm = d[d["method"] == m]
+        if dm.empty:
+            continue
+        mk, ls = _style(m)
+        raw = dm[(dm["alpha"] == 1.0) & (dm["hysteresis"] == 0.0)]
+        if raw["threshold"].nunique() <= 1:                 # rule: one operating point
+            x, y = raw["false_episodes_per_uav_hour"].mean(), raw["event_cdr"].mean()
+            ax.plot([x], [y], marker=mk, ls="none", ms=6, label=m)
+            meta[m] = {"point": [float(x), float(y)]}
+            continue
+        g = raw.groupby("threshold")[["false_episodes_per_uav_hour", "event_cdr"]].mean().sort_values("false_episodes_per_uav_hour")
+        g = g[g["false_episodes_per_uav_hour"] > 0]
+        line, = ax.plot(g["false_episodes_per_uav_hour"], g["event_cdr"], ls=ls, label=m)
+        meta[m] = {"raw_points": len(g)}
+        if ev is not None:                                  # validation-F1 operating point
+            e = ev[(ev["method"] == m) & (ev["persistence"] == 1)]
+            if not e.empty:
+                ax.plot([e["false_episodes_per_uav_hour"].mean()], [e["event_cdr"].mean()], marker=mk, ls="none",
+                        color=line.get_color(), ms=5)
+        if m == layer_method and bud is not None:
+            b = bud[(bud["method"] == m) & (bud["feasible"] == 1)]
+            kinds = sorted(b["budget_kind"].astype(str).unique(),
+                           key=lambda k: (not k.startswith("match"), float(k.split("_")[-1]) if k.split("_")[-1].replace(".", "", 1).isdigit() else 0.0))
+            b = b[b["budget_kind"].astype(str) == kinds[0]] if kinds else b
+            if not b.empty:
+                a_sel, h_sel = float(b["alpha"].mode().iloc[0]), float(b["hysteresis"].mode().iloc[0])
+                lay = dm[(dm["alpha"] == a_sel) & (dm["hysteresis"] == h_sel)]
+                gl = lay.groupby("threshold")[["false_episodes_per_uav_hour", "event_cdr"]].mean().sort_values("false_episodes_per_uav_hour")
+                gl = gl[gl["false_episodes_per_uav_hour"] > 0]
+                if not gl.empty:
+                    ax.plot(gl["false_episodes_per_uav_hour"], gl["event_cdr"], ls=":", color=line.get_color(),
+                            label=f"{m} + EMA/hyst.")
+                    meta[m]["layer"] = {"alpha": a_sel, "hysteresis": h_sel}
+                ax.plot([b["false_episodes_per_uav_hour"].mean()], [b["event_cdr"].mean()], marker="*", ls="none",
+                        color=line.get_color(), ms=7)
+    ax.set_xscale("log")
+    ax.set_xlabel("False alert episodes per UAV-hour")
+    ax.set_ylabel("Event CDR")
+    ax.set_ylim(0, 1)
+    ax.grid(alpha=0.3, lw=0.4, which="both")
+    ax.legend(handlelength=1.8, loc="lower right", ncol=1)
+    _save(fig, out)
+    return meta
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--results_dir", default="results")
@@ -197,6 +260,7 @@ def main():
         "scaling": fig_scaling(R / "scaling.csv", R / "scaling_fit.json", O / "fig_scaling.pdf"),
         "attention": fig_attention(R / "attention_vs_aoi.csv", O / "fig_attention_aoi.pdf", args.attention_layer),
         "lead": fig_lead(R / "events_lead.npz", R / "events.csv", args.methods, O / "fig_lead.pdf"),
+        "soc": fig_soc(R / "events_soc.csv", R / "events.csv", R / "events_budget.csv", args.methods, O / "fig_soc.pdf"),
     }
     O.mkdir(parents=True, exist_ok=True)
     json.dump({"results_dir": str(R), **info}, open(O / "figures_provenance.json", "w"), indent=2, default=str)

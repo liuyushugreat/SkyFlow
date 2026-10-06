@@ -127,6 +127,154 @@ class TestEventLogic:
             assert window_index_groups(n, K) == want
 
 
+def _naive_tracks(tab):
+    """(scenario, key) -> list of row indices in time order, split at gaps."""
+    tracks, cur, prev = [], [], None
+    for r in range(len(tab)):
+        k = (int(tab.scenario[r]), int(tab.key[r]), int(tab.t[r]))
+        if prev is not None and (k[0], k[1]) == (prev[0], prev[1]) and k[2] == prev[2] + 1:
+            cur.append(r)
+        else:
+            if cur:
+                tracks.append(cur)
+            cur = [r]
+        prev = k
+    if cur:
+        tracks.append(cur)
+    return tracks
+
+
+class TestOperationalLayer:
+    """EMA smoothing, hysteresis and the SOC machinery (S8f, options A/D)."""
+
+    def _random_table(self, seed=0, n_snap=12, n_pairs=15):
+        rng = np.random.RandomState(seed)
+        S = []
+        for idx in range(n_snap):
+            rows = []
+            for p in range(n_pairs):
+                if rng.rand() < 0.75:                       # pairs drop in and out of the candidate set
+                    i, j = p, p + 20
+                    if rng.rand() < 0.5:
+                        i, j = j, i
+                    lab = 1 if (p % 3 == 0 and 2 <= (idx % 6) <= 5) else 0
+                    rows.append((i, j, rng.rand(), lab, 30 - (idx % 6) * 5 if lab else -1, 0 if lab else -1))
+            S.append(_scores(idx, rows, n_uavs=40))
+        return EventTable.from_scores(S, threshold=0.5, snapshots_per_scenario=6)
+
+    def test_table_is_sorted_and_positions_follow_tracks(self):
+        tab = self._random_table()
+        order = np.lexsort((tab.t, tab.key, tab.scenario))
+        assert (order == np.arange(len(tab))).all()
+        for tr in _naive_tracks(tab):
+            assert tab.position[tr].tolist() == list(range(len(tr)))
+
+    def test_ema_matches_naive_recursion(self):
+        from skyflow.experiments.events import smooth_scores
+        tab = self._random_table(1)
+        for alpha in (1.0, 0.5, 0.2):
+            s = smooth_scores(tab, alpha)
+            for tr in _naive_tracks(tab):
+                acc = None
+                for r in tr:
+                    acc = tab.score[r] if acc is None else alpha * tab.score[r] + (1 - alpha) * acc
+                    assert s[r] == pytest.approx(acc)
+        with pytest.raises(ValueError):
+            smooth_scores(tab, 0.0)
+
+    def test_hysteresis_matches_naive_and_plain_threshold_is_special_case(self):
+        from skyflow.experiments.events import hysteresis_alerts
+        tab = self._random_table(2)
+        s = tab.score
+        assert (hysteresis_alerts(tab, s, 0.5, 0.5) == (s >= 0.5)).all()
+        a = hysteresis_alerts(tab, s, 0.6, 0.3)
+        for tr in _naive_tracks(tab):
+            on = False
+            for r in tr:
+                on = s[r] >= 0.6 or (on and s[r] >= 0.3)
+                assert bool(a[r]) == on
+        assert a.sum() >= (s >= 0.6).sum()
+        with pytest.raises(ValueError):
+            hysteresis_alerts(tab, s, 0.3, 0.6)
+
+    def test_soc_curve_is_monotone_and_pruning_is_exact(self):
+        from skyflow.experiments.events import filtered_alerts, soc_curve, threshold_grid
+        tab = self._random_table(3, n_snap=24, n_pairs=30)
+        grid = threshold_grid(tab, 9)
+        assert tab.threshold in grid and np.all(np.diff(grid) > 0)
+        for alpha, h in ((1.0, 0.0), (0.5, 0.1)):
+            pts = soc_curve(tab, grid, alpha, h, lead_s=5.0)
+            cdr = [p.event_cdr for p in pts]
+            # detected events shrink monotonically with the threshold (episode counts need not: a
+            # higher threshold can split one long false run into two)
+            assert all(x >= y - 1e-12 for x, y in zip(cdr, cdr[1:]))
+            assert pts[0].false_episodes_per_uav_hour > pts[-1].false_episodes_per_uav_hour
+            # same numbers without pruning (full table, explicit alert vector)
+            for p in pts:
+                full = event_metrics(tab, lead_s=5.0, alert=filtered_alerts(tab, p.threshold, alpha, h))
+                assert (full.event_cdr, full.n_false_episodes, full.n_alert_episodes) == \
+                       (p.event_cdr, p.n_false_episodes, p.n_alert_episodes)
+                assert full.lead_s["median"] == pytest.approx(p.lead_s["median"], nan_ok=True)
+
+    def test_budget_selection(self):
+        from skyflow.experiments.events import select_operating_point, soc_curve, threshold_grid
+        tab = self._random_table(4, n_snap=24, n_pairs=30)
+        pts = soc_curve(tab, threshold_grid(tab, 9), 1.0, 0.0, lead_s=5.0)
+        rates = sorted(p.false_episodes_per_uav_hour for p in pts)
+        budget = rates[len(rates) // 2]
+        sel = select_operating_point(pts, budget)
+        assert sel is not None and sel.false_episodes_per_uav_hour <= budget
+        assert sel.event_cdr == max(p.event_cdr for p in pts if p.false_episodes_per_uav_hour <= budget)
+        assert select_operating_point(pts, -1.0) is None
+
+
+class TestNearMiss:
+    def test_rho_on_synthetic_trajectories(self):
+        from skyflow.experiments.nearmiss import normalised_separation
+        T, N = 50, 3
+        pos = np.zeros((T, N, 3), dtype=np.float32)
+        pos[:, 1, 0] = np.linspace(100.0, 0.0, T)       # UAV1 closes on UAV0 horizontally, same altitude
+        pos[:, 2, 0] = 4.0                               # UAV2 4 m away but 10 m higher -> vertical keeps it apart
+        pos[:, 2, 2] = 10.0
+        i = np.array([0, 0]); j = np.array([1, 2])
+        rho = normalised_separation(pos, 0, i, j, horizon_epochs=T - 1, h_sep=10.0, v_sep=3.0)
+        assert rho[0] == pytest.approx(0.0, abs=1e-6)                     # reaches the same point
+        assert rho[1] == pytest.approx(max(4.0 / 10.0, 10.0 / 3.0))
+        rho_short = normalised_separation(pos, 0, i[:1], j[:1], horizon_epochs=10, h_sep=10.0, v_sep=3.0)
+        assert rho_short[0] == pytest.approx(pos[10, 1, 0] / 10.0)
+        # window clipped at the end of the log
+        assert normalised_separation(pos, T - 1, i[:1], j[:1], 20, 10.0, 3.0)[0] == pytest.approx(0.0, abs=1e-6)
+
+    def test_resimulated_truth_reproduces_cached_labels(self):
+        """rho < 1 for every positive and >= 1 for every negative of a simulated split."""
+        from skyflow.experiments.events import EventTable, SnapshotScores
+        from skyflow.experiments.nearmiss import near_miss_analysis
+        cfg = _tiny_cfg()
+        cfg.data.num_uavs = 40
+        sim = cfg.make_simulator(seed=cfg.data.sim_seed)
+        data = sim.generate_dataset("test", 2, 6.0, builder=cfg.make_builder())
+        logs = cfg.make_simulator(seed=cfg.data.sim_seed).simulate_logs("test", 2, 6.0)
+        scores = []
+        for idx, (snap, lab) in enumerate(data):
+            P = snap.conflict_pairs.size(1)
+            rng = np.random.RandomState(idx)
+            scores.append(SnapshotScores(idx, snap.conflict_pairs.numpy(), rng.rand(P), lab.numpy(),
+                                         snap.conflict_ttc.numpy(), snap.conflict_cause.numpy(), snap.num_uavs))
+        sps = len(data) // 2
+        tab = EventTable.from_scores(scores, 0.5, sps)
+        assert tab.label.sum() > 0
+        epoch_step = int(round(6.0 * cfg.data.sim_freq_hz / sps))
+        res = near_miss_analysis(tab, tab.alert, logs, epoch_step, int(round(cfg.data.lookahead_seconds * cfg.data.sim_freq_hz)),
+                                 cfg.data.conflict_h_sep_m, cfg.data.conflict_v_sep_m, n_negative_sample=5000)
+        assert res.positive_mismatch == 0 and res.negative_mismatch == 0
+        assert res.n_positive_checked == int(tab.label.sum())
+        assert res.rho_false_rows.size == int((tab.alert & ~tab.label).sum())
+        assert (res.rho_false_rows >= 1.0).all()
+        rows = {r["group"]: r for r in res.rows()}
+        assert rows["positive_check"]["frac_lt_1"] == 1.0 and rows["negative_sample"]["frac_lt_1"] == 0.0
+        assert res.rho_false_episodes.size <= res.rho_false_rows.size
+
+
 def _load_script(name):
     import importlib.util, pathlib
     spec = importlib.util.spec_from_file_location(

@@ -301,6 +301,47 @@ counts, oracle / silent detectors, gap and scenario-boundary handling, persisten
 identical to the trainer, TR-GAT per-snapshot scores reproduce `evaluate()` TP/FP/FN, rule + learned
 baselines run, robustness condition overrides link_mix / changes the cache key / OOD flag).
 
+### 11.1 Operational layer, SOC curves, matched false-alert budgets, near-miss analysis (10-06 night)
+
+Motivation: 209 false alert episodes per UAV-hour at the validation-F1 threshold is hard to defend
+even against 42 true events per UAV-hour. Still evaluation-only (labels, models and training untouched):
+
+- **A — operational layer** (`events.py`): per-pair EMA smoothing of the score along the pair track
+  (`smooth_scores`, alpha; reset when the pair re-enters the candidate set), hysteresis alerting
+  (`hysteresis_alerts`, on at theta, off below theta-h) and M-of-M persistence. All parameters are
+  selected on the validation split only.
+- **D — SOC curve + budget-matched operating points** (Kuchar 1996 system operating characteristic):
+  `soc_curve` sweeps a 21-point quantile grid of thresholds for every (alpha, hysteresis) in
+  {1, 0.5, 0.25} x {0, 0.15}; `select_operating_point` picks, on val, the point with the highest event
+  CDR whose false-episode rate is <= a budget, then that fixed (threshold, alpha, h) is evaluated on
+  test. Budgets: fixed 20 / 50 / 100 per UAV-h and the CPA-Rule's own val false rate
+  (`match_CPA-Rule`, reported first in tables / macros). Outputs `results/events_soc.csv`,
+  `events_budget.csv`, `events_budget_summary.csv`; `fig_soc.pdf` (log-x false episodes vs event CDR,
+  raw curve per method, dotted TR-GAT + layer, star = matched-budget point); `tab_events.tex` gains a
+  "matched FA budget" block; macros `\evB<Kind><Key><M>`, `\evB<Key><M>` (first kind), `\soc...`.
+- **E — near-miss analysis** (`skyflow/experiments/nearmiss.py`, `scripts/analyze_nearmiss.py`):
+  re-simulates the deterministic truth, checks that it reproduces the stored labels exactly, and
+  computes the normalised minimum separation rho = min_k max(dh/10 m, dv/3 m) over the 30 s window for
+  false alert rows / false episodes / a 200k random negative sample. Output `results/nearmiss.csv`,
+  macros `\nm<Group><Key><M>`, `\nmMismatch<M>`. S15 stage `nearmiss`.
+
+Probe on TR-GAT seed 42 (`results/_events_probe`, not committed; test split, N=500):
+hysteresis h=0.15 alone keeps event CDR 0.858 and cuts false episodes to 118/UAV-h (-43 %);
+alpha=0.5, h=0.15 reaches CDR 0.854 at 100/UAV-h (-52 %) and ~0.94 at the raw false rate (~207).
+Val-selected budget points evaluated on test: 20/UAV-h -> CDR 0.548, lead 8.9 s (17.0 false);
+50 -> 0.769, 19.4 s (60.8); 100 -> 0.881, 22.9 s (117). Near-miss: 0 label mismatches
+(78,749 positives + 200k negatives re-simulated); false rows median rho 2.33 (24 % < 1.5, 42 % < 2,
+65 % < 3), false episodes median 2.70, random negatives median 84.6 (0.2 % < 2): the false alerts are
+near-misses, not random pairs. Runtime ~65 s per checkpoint after pruning / radix-sort optimisation.
+
+Verification: `pytest -q` 171 passed (new: sorted table / positions, EMA vs naive loop, hysteresis vs
+naive loop, SOC curve monotone CDR and pruning exactness, budget selection, synthetic rho, re-simulated
+truth reproduces labels). Dry runs of `make_tables` / `make_macros` / `make_figures` on the probe
+directory produce `tab_events.tex`, 131 macros and `fig_soc.pdf` (TrueType embedded only).
+
+Deferred (decide after the chain): **B** — pair-level temporal memory inside TR-GAT (a model change,
+needs retraining of all seeds). **C** (temporal consistency loss) not recommended.
+
 ## Conclusion
 
 **Do not rent: the local 4090 (2 concurrent tasks) finishes the main experiment and 3-seed ablations by about 10-07 evening even if every run goes to 150 epochs.**

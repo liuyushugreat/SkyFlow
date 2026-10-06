@@ -23,8 +23,11 @@ Stage scaling   "python scripts/run_scaling.py --checkpoint results/main/TR-GAT/
 Stage attention "python scripts/analyze_attention_aoi.py --checkpoint results/main/TR-GAT/seed42 --out_csv results/attention_vs_aoi.csv"
 # 5b. S8e intent-conformance gate value per conflict cause
 Stage gate      "python scripts/analyze_gate.py --checkpoint results/main/TR-GAT/seed42 --out_csv results/gate_by_cause.csv"
-# 5c. S8f event-level (operational) metrics for every checkpoint: event CDR, lead time, false episodes / UAV-h
+# 5c. S8f event-level (operational) metrics for every checkpoint: event CDR, lead time, false episodes / UAV-h,
+#     SOC curves (EMA x hysteresis operational layer) and budget-matched operating points selected on val
 Stage events    "python scripts/eval_events.py --results_dir results/main --out_dir results --persistence 1 3"
+# 5e. S8f near-miss analysis of false alerts (re-simulated truth; labels unchanged)
+Stage nearmiss  "python scripts/analyze_nearmiss.py --checkpoints results/main/TR-GAT/seed42 results/main/GAT-S/seed42 results/main/CPA-Rule/seed42 results/main/Plan-CPA/seed42 --budget_csv results/events_budget.csv --out_csv results/nearmiss.csv"
 # 5d. CPU-only inference latency of TR-GAT (edge box without GPU); graph build is CPU already
 Stage cpulat    "python scripts/eval_only.py --results_dir results/main --methods TR-GAT --seeds 42 --device cpu --skip_graph_build --latency_epochs 200 --out_dir results/eval_cpu"
 # 6. S16 artefacts

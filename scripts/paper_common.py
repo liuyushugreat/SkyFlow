@@ -80,6 +80,10 @@ class Results:
         self.events = self._csv(R / "events_summary.csv")           # S8f event-level metrics (per method x persistence)
         self.events_cause = self._csv(R / "events_by_cause.csv")
         self.events_meta = self._json(R / "events.json")
+        self.events_soc = self._csv(R / "events_soc.csv")           # SOC curves (val + test)
+        self.events_budget = self._csv(R / "events_budget.csv")     # per method x seed x budget
+        self.events_budget_summary = self._csv(R / "events_budget_summary.csv")
+        self.nearmiss = self._csv(R / "nearmiss.csv")
         self.main_dir = R / "main" if (R / "main").is_dir() else R   # per-task metrics.json live here
 
     @staticmethod
@@ -125,4 +129,26 @@ class Results:
 
     def events_p_value(self, metric, method, persistence=1):
         t = (self.events_meta or {}).get("tests", {}).get(f"persistence_{persistence}", {})
+        return t.get(f"paired_t_{metric}", {}).get(method, {}).get("p_bonferroni")
+
+    def budget_kinds(self):
+        if self.events_budget_summary is None:
+            return []
+        kinds = [str(k) for k in dict.fromkeys(self.events_budget_summary["budget_kind"])]
+
+        def _val(k):
+            tail = k.split("_")[-1]
+            return float(tail) if tail.replace(".", "", 1).isdigit() else 0.0
+        # matched-rule budget first, then fixed budgets by increasing value
+        return sorted(kinds, key=lambda k: (not k.startswith("match"), _val(k)))
+
+    def budget_rows(self, kind):
+        """Budget-matched summary rows (dict per method) for one budget kind."""
+        if self.events_budget_summary is None:
+            return {}
+        d = self.events_budget_summary[self.events_budget_summary["budget_kind"] == kind]
+        return {r["method"]: r.to_dict() for _, r in d.iterrows()}
+
+    def budget_p_value(self, metric, method, kind):
+        t = (self.events_meta or {}).get("budget_tests", {}).get(f"budget_kind_{kind}", {})
         return t.get(f"paired_t_{metric}", {}).get(method, {}).get("p_bonferroni")

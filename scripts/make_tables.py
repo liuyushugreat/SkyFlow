@@ -139,17 +139,28 @@ def tab_events(res: Results, out: Path, methods, persistence=1):
         print("[skip] events table: no events_summary.csv"); return
     ref = (res.events_meta or {}).get("reference", "TR-GAT")
     lead_s = (res.events_meta or {}).get("lead_s", 10)
+    # budget-matched block: the matched-rule budget if available, else the first fixed budget
+    kinds = res.budget_kinds()
+    bkind = kinds[0] if kinds else None
+    brows = res.budget_rows(bkind) if bkind else {}
     cols = {
         "ev": ([r["event_cdr_mean"] for _, r in rows], True),
         "tm": ([r["timely_cdr_mean"] for _, r in rows], True),
         "ld": ([r["lead_median_s_mean"] for _, r in rows], True),
-        "pr": ([r["episode_precision_mean"] for _, r in rows], True),
         "fa": ([r["false_episodes_per_uav_hour_mean"] for _, r in rows], False),
+        "bev": ([brows.get(m, {}).get("event_cdr_mean") for m, _ in rows], True),
+        "bld": ([brows.get(m, {}).get("lead_median_s_mean") for m, _ in rows], True),
     }
     bold = {k: _bold_mask(v, hb) for k, (v, hb) in cols.items()}
-    head = ["Method", "Event CDR$\\uparrow$", f"Timely ($\\ge${lead_s:g}\\,s)$\\uparrow$", "Lead (s)$\\uparrow$",
-            "Episode prec.$\\uparrow$", "False ep./UAV-h$\\downarrow$"]
-    lines = ["\\begin{tabular}{lccccc}", "\\toprule", " & ".join(head) + " \\\\", "\\midrule"]
+    head = ["Method", "Event CDR$\\uparrow$", f"Timely$\\uparrow$", "Lead (s)$\\uparrow$", "FA/UAV-h$\\downarrow$"]
+    spec = "lcccc"
+    if brows:
+        head += ["Event CDR$\\uparrow$", "Lead (s)$\\uparrow$"]; spec += "cc"
+    lines = ["\\begin{tabular}{" + spec + "}", "\\toprule"]
+    if brows:
+        lines.append("& \\multicolumn{4}{c}{validation-F1 threshold} & \\multicolumn{2}{c}{matched FA budget} \\\\")
+        lines.append("\\cmidrule(lr){2-5}\\cmidrule(lr){6-7}")
+    lines += [" & ".join(head) + " \\\\", "\\midrule"]
     for i, (m, r) in enumerate(rows):
         ev = fmt_pm(r["event_cdr_mean"], r["event_cdr_std"])
         if m != ref:
@@ -160,14 +171,28 @@ def tab_events(res: Results, out: Path, methods, persistence=1):
                  _b(ev, bold["ev"][i]),
                  _b(fmt_pm(r["timely_cdr_mean"], r["timely_cdr_std"]), bold["tm"][i]),
                  _b(fmt(r["lead_median_s_mean"], 1), bold["ld"][i]),
-                 _b(fmt_pm(r["episode_precision_mean"], r["episode_precision_std"]), bold["pr"][i]),
                  _b(fmt(r["false_episodes_per_uav_hour_mean"], 1), bold["fa"][i])]
+        if brows:
+            b = brows.get(m)
+            if b is None:
+                cells += ["--", "--"]
+            else:
+                bev = fmt_pm(b["event_cdr_mean"], b["event_cdr_std"])
+                if m != ref:
+                    p = res.budget_p_value("event_cdr", m, bkind)
+                    if p is not None and math.isfinite(p):
+                        bev += "$^{*}$" if p < 0.05 else "$^{\\dagger}$"
+                cells += [_b(bev, bold["bev"][i]), _b(fmt(b["lead_median_s_mean"], 1), bold["bld"][i])]
         lines.append(" & ".join(cells) + " \\\\")
     lines += ["\\bottomrule", "\\end{tabular}"]
     n_ev = rows[0][1].get("n_events")
+    bval = ""
+    if brows:
+        any_b = next(iter(brows.values()))
+        bval = f"; budget kind={bkind}, value={any_b.get('budget_mean')}"
     note = (f"% auto-generated from {res.dir}; do not edit\n"
-            f"% persistence M={persistence}; events={n_ev}; UAV-hours={rows[0][1].get('uav_hours')}; "
-            f"* : p<0.05 vs {ref} on event CDR (paired t over seeds, Bonferroni)\n")
+            f"% persistence M={persistence}; events={n_ev}; UAV-hours={rows[0][1].get('uav_hours')}; timely = lead >= {lead_s} s"
+            f"{bval}; * : p<0.05 vs {ref} on event CDR (paired t over seeds, Bonferroni)\n")
     _write(out, note + "\n".join(lines) + "\n")
 
 

@@ -280,12 +280,77 @@ def main():
                 M.add("evNEvents", f"{int(any_row['n_events']):,}".replace(",", "\\,"))
                 M.add("evUavHours", f"{float(any_row['uav_hours']):.1f}")
                 M.add("evPerUavHour", f"{float(any_row['n_events']) / float(any_row['uav_hours']):.1f}")
+        # budget-matched operating points (selected on val): \evB<metric><Method> for the first (matched) budget,
+        # \evB<Kind><metric><Method> for every budget kind (Kind = MatchCpaRule / FixedTwoZero ...)
+        for k_i, kind in enumerate(res.budget_kinds()):
+            ktag = macro_name("".join(num_word(c) if c.isdigit() else c for c in str(kind)).replace("_", " ").replace(".", " "))
+            ktag = ktag[:1].upper() + ktag[1:]
+            rows_b = res.budget_rows(kind)
+            for m, r in rows_b.items():
+                for key, col, nd in (("Cdr", "event_cdr_mean", 3), ("CdrStd", "event_cdr_std", 3),
+                                     ("Timely", "timely_cdr_mean", 3), ("LeadMed", "lead_median_s_mean", 1),
+                                     ("Prec", "episode_precision_mean", 3), ("FaH", "false_episodes_per_uav_hour_mean", 1),
+                                     ("Thr", "threshold_mean", 3), ("Alpha", "alpha_mean", 2), ("Hyst", "hysteresis_mean", 2),
+                                     ("Budget", "budget_mean", 1)):
+                    M.num(macro_name(f"evB{ktag}{key}", m), r.get(col), nd)
+                    if k_i == 0:
+                        M.num(macro_name(f"evB{key}", m), r.get(col), nd)
+                if m != ref:
+                    p = res.budget_p_value("event_cdr", m, kind)
+                    if _num_ok(p):
+                        M.add(macro_name(f"evB{ktag}PCdr", m), fmt_p(float(p)))
+                        if k_i == 0:
+                            M.add(macro_name("evBPCdr", m), fmt_p(float(p)))
+            if k_i == 0:
+                M.add("evBudgetKind", str(kind).replace("_", "\\_"))
+        # SOC facts: for the reference, false-episode rate of the operational layer at (about) the raw event CDR
+        if res.events_soc is not None and ref in set(res.events_soc["method"]):
+            soc = res.events_soc[(res.events_soc["method"] == ref) & (res.events_soc["split"] == "test")]
+            raw = res.events_rows(1).get(ref)
+            if raw is not None and not soc.empty:
+                target = float(raw["event_cdr_mean"])
+                base_fa = float(raw["false_episodes_per_uav_hour_mean"])
+                best = None
+                for (a, h), g in soc.groupby(["alpha", "hysteresis"]):
+                    if a == 1.0 and h == 0.0:
+                        continue
+                    g = g.groupby("threshold")[["event_cdr", "false_episodes_per_uav_hour"]].mean().reset_index()
+                    ok = g[g["event_cdr"] >= target]
+                    if ok.empty:
+                        continue
+                    fa = float(ok["false_episodes_per_uav_hour"].min())
+                    if best is None or fa < best[0]:
+                        best = (fa, a, h)
+                if best is not None:
+                    M.num("socLayerFaHAtRawCdr", best[0], 1)
+                    M.add("socLayerFaHReductionPct", f"{(base_fa - best[0]) / base_fa * 100:.0f}" if base_fa > 0 else "")
+                    M.add("socLayerAlpha", f"{best[1]:g}")
+                    M.add("socLayerHyst", f"{best[2]:g}")
         if res.events_cause is not None:
             c = res.events_cause[res.events_cause["persistence"] == 1] if "persistence" in res.events_cause else res.events_cause
             g = c.groupby(["method", "cause"])[["event_cdr", "timely_cdr", "lead_median_s"]].mean().reset_index()
             for _, r in g.iterrows():
                 M.num(macro_name("evCdrCause", r["cause"], r["method"]), r["event_cdr"], 3)
                 M.num(macro_name("evLeadCause", r["cause"], r["method"]), r["lead_median_s"], 1)
+
+    # ---- near-miss analysis of false alerts (S8f) -------------------------
+    # \nm<Group><Stat><Method> at the validation-F1 operating point, e.g. \nmFalseRowsLtTwoTrGat (fraction of false
+    # alert rows with normalised separation < 2), \nmFalseEpisodesMedRhoTrGat, \nmNegativeSampleLtTwoTrGat
+    if res.nearmiss is not None:
+        nm = res.nearmiss[res.nearmiss["operating_point"] == "val_f1"] if "operating_point" in res.nearmiss else res.nearmiss
+        lv_name = {"1": "One", "1.5": "OneHalf", "2": "Two", "3": "Three"}
+        for (m, grp), g in nm.groupby(["method", "group"]):
+            r = g.iloc[0]
+            M.num(macro_name("nm", grp, "MedRho", m), r["rho_median"], 2)
+            M.add(macro_name("nm", grp, "N", m), f"{int(r['n']):,}".replace(",", "\\,"))
+            for col in g.columns:
+                if col.startswith("frac_lt_"):
+                    lv = col[len("frac_lt_"):]
+                    if _num_ok(r[col]):
+                        M.add(macro_name("nm", grp, "Lt" + lv_name.get(lv, lv), m), f"{float(r[col]) * 100:.0f}")
+            if (_num_ok(r.get("positive_mismatch")) and _num_ok(r.get("negative_mismatch"))
+                    and macro_name("nmMismatch", m) not in M.names):
+                M.add(macro_name("nmMismatch", m), f"{int(r['positive_mismatch']) + int(r['negative_mismatch'])}")
 
     # ---- intent-conformance gate (S8e) ----------------------------------
     if res.gate is not None:
