@@ -225,6 +225,42 @@ and the pair mode back to the S8c setting. Not in the cache key (pair features a
 the caches above are reused; `pytest -q` 143 passed; smoke run of TR-GAT, GAT-S and `abl_no_plan` on
 `configs/smoke.yaml` OK. The chain was relaunched with `--resume` (CPA-Rule and Plan-CPA seed 42 kept).
 
+## 10. Fourth restart (2026-10-06 afternoon, S8e: sync + gate + heterogeneous links)
+
+Partial S8d-2 results (`results/archive/main_plan_s8d2`, test split): CPA-Rule F1 0.353, Plan-CPA 0.336,
+TR-GAT 0.387 ± 0.002 (3 seeds), TR-GAT-NT 0.390 ± 0.001, **GAT-S 0.403 ± 0.003** (0.18 M parameters vs
+1.15 M), STGCN seed 42 0.408. Learned models finally beat both rules (AUPRC 0.35–0.39 vs 0.13), but the
+temporal machinery of TR-GAT brought nothing. Three verifiable reasons:
+
+1. Reports were used at their *reported* positions: with per-UAV latency 0.5–1.2 s (+3 s non-cooperative)
+   and 10–15 m/s, two reports of different age are misaligned by up to ~15 m - more than the 10 m
+   threshold. The AoI only entered as one scalar max(a_i, a_j).
+2. The GRU state was detached after every snapshot (truncated BPTT of length 1), and the training
+   distribution had near-constant AoI and no packet loss, so the temporal path had no signal to learn.
+3. 1000 warm-up steps (4 epochs at ~0 lr) for TR-GAT only; baselines had no schedule at all.
+
+Changes (user decision 16:17, "do whatever most improves the ISCAS odds"), all behind config switches:
+
+- `features.pair_edge_features: geometry_plan_sync` (22-d): every report is dead-reckoned to the common
+  epoch with its own age (p' = p + v·AoI) before Δp, CPA geometry and plan geometry are formed; both ages
+  are given. Both CPA rules apply the same synchronisation (`aoi_sync`). `abl_no_sync` = S8d-2 setting.
+- `model.use_conformance_gate: true` (TR-GAT only): w_i = σ(MLP[s_i ‖ r_i]) with r_i the plan/telemetry
+  residual; pair geometry on w·plan + (1-w)·extrapolation plus (w_i, w_j) is appended to the head input
+  (+9). `abl_no_conf_gate` removes it.
+- `training.tbptt_detach: false` (BPTT through the K-snapshot window; `abl_tbptt` = legacy),
+  `training.warmup_steps: 200`, `training.scheduler: warmup_cosine` now applied to every learned baseline.
+- `sim.link_mix`: every scenario draws packet loss U(0, 0.3) and latency range [U(0.3,0.8), U(1,3)] s
+  from its own seed (train/val/test alike; explicit obs_params in the robustness sweeps still override).
+  Changes the cache key (sim section).
+
+Verification: `pytest -q` 155 passed (new `tests/test_s8e_sync_gate_links.py`, 12 tests incl. one
+end-to-end TR-GAT step with gate + BPTT); smoke run of CPA-Rule, Plan-CPA, TR-GAT, GAT-S, abl_no_conf_gate,
+abl_no_plan OK. The S8d-2 chain driver and run_main were stopped (STGCN workers left to finish); their
+results are archived, not committed.
+
+Plan: build caches → 1-seed validation selection of TR-GAT capacity (128/4 vs 64/2) on **val only** →
+3 seeds of all methods + ablations → S15 → paper. Budget: one full round before the 10-14 deadline.
+
 ## Conclusion
 
 **Do not rent: the local 4090 (2 concurrent tasks) finishes the main experiment and 3-seed ablations by about 10-07 evening even if every run goes to 150 epochs.**
