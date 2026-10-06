@@ -14,6 +14,7 @@ from skyflow.baselines.lstm_pair import LSTMPair
 from skyflow.baselines.stgcn import STGCN
 from skyflow.baselines.transformer_pair import TransformerPair
 from skyflow.baselines.velocity_obstacle import VelocityObstacle
+from skyflow.models.conflict_head import mode_uses_sync
 
 
 @dataclass(frozen=True)
@@ -32,6 +33,7 @@ def _cpa_rule(cfg, device, cls=CPARule):
         h_thresh=cfg.data.conflict_h_sep_m,
         v_thresh=cfg.data.conflict_v_sep_m,
         threshold_mode=mode,
+        aoi_sync=mode_uses_sync(cfg.features.pair_edge_features),   # S8e: rules get the same synchronisation
     )
 
 

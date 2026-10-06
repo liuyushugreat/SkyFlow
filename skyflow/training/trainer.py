@@ -20,6 +20,7 @@ from skyflow.models.tr_gat import TRGAT
 from skyflow.models.conflict_head import (
     ConflictScoringHead,
     build_pair_edge_features,
+    mode_uses_sync,
     pair_edge_feature_dim,
     plan_column,
 )
@@ -61,6 +62,21 @@ def _build_warmup_cosine_scheduler(optimizer, warmup_steps: int, total_steps: in
     warmup = LambdaLR(optimizer, lr_lambda=warmup_fn)
     cosine = CosineAnnealingLR(optimizer, T_max=max(total_steps - warmup_steps, 1))
     return SequentialLR(optimizer, schedulers=[warmup, cosine], milestones=[warmup_steps])
+
+
+SCHEDULERS = ("warmup_cosine", "none")
+
+
+def build_scheduler(optimizer, name: str, warmup_steps: int, total_steps: int):
+    """Shared by TR-GAT and every learned baseline (S8e: identical schedule).
+    ``warmup_cosine``: linear warmup over min(warmup_steps, total/10) then
+    cosine decay; ``none``: constant learning rate."""
+    if name not in SCHEDULERS:
+        raise ValueError(f"training.scheduler must be one of {SCHEDULERS}, got {name!r}")
+    if name == "none":
+        return LambdaLR(optimizer, lr_lambda=lambda step: 1.0)
+    return _build_warmup_cosine_scheduler(
+        optimizer, warmup_steps=min(int(warmup_steps), max(total_steps // 10, 1)), total_steps=total_steps)
 
 
 class SkyFlowTrainer:
@@ -113,6 +129,7 @@ class SkyFlowTrainer:
             recurrent_dim=mc.recurrent_dim,
             edge_feature_dim=pair_edge_feature_dim(self.cfg.features.pair_edge_features),
             dropout=mc.dropout,
+            conformance_gate=bool(getattr(mc, "use_conformance_gate", False)) and self.cfg.plan_context(),
         ).to(self.device)
 
         total_params = self.model.count_parameters() + sum(
@@ -163,6 +180,9 @@ class SkyFlowTrainer:
         min_epochs = int(getattr(tc, "min_epochs", 1))
         eval_every = max(int(getattr(tc, "eval_every", 1)), 1)
         use_amp = bool(getattr(tc, "amp", False)) and self.device.type == "cuda"
+        # S8e: back-propagate through the recurrent state across the K snapshots
+        # of a window (default). True = legacy truncation to a single step.
+        detach_state = bool(getattr(tc, "tbptt_detach", False))
 
         params = list(self.model.parameters()) + list(self.head.parameters())
         optimizer = AdamW(params, lr=tc.learning_rate, weight_decay=tc.weight_decay)
@@ -170,9 +190,8 @@ class SkyFlowTrainer:
         n_windows = len(self._group_into_windows(train_data, K))
         steps_per_epoch = max(int(np.ceil(n_windows / batch_windows)), 1)
         total_steps = n_epochs * steps_per_epoch
-        scheduler = _build_warmup_cosine_scheduler(
-            optimizer, warmup_steps=min(tc.warmup_steps, max(total_steps // 10, 1)), total_steps=total_steps
-        )
+        scheduler = build_scheduler(optimizer, getattr(tc, "scheduler", "warmup_cosine"),
+                                    tc.warmup_steps, total_steps)
         criterion = build_loss(getattr(tc, "loss", "focal"), tc.focal_gamma,
                                getattr(tc, "focal_alpha", 0.75))
 
@@ -212,13 +231,15 @@ class SkyFlowTrainer:
                     )
                 pairs = snapshot.conflict_pairs
                 if pairs is None or pairs.size(1) == 0:
-                    rec_state = rec_state.detach()
+                    if detach_state:
+                        rec_state = rec_state.detach()
                     continue
                 with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=use_amp):
                     preds = self._score_pairs(snapshot, node_emb, rec_state, pairs)
                 loss = loss + criterion(preds.float(), labels)
                 valid += 1
-                rec_state = rec_state.detach()
+                if detach_state:
+                    rec_state = rec_state.detach()
             return loss, valid
 
         t_start = time.perf_counter()
@@ -464,16 +485,20 @@ class SkyFlowTrainer:
         pairs: torch.Tensor,
     ) -> torch.Tensor:
         """Eq. (6): score pairs with leakage-free edge features e_ij."""
+        mode = self.cfg.features.pair_edge_features
+        plan_col0 = plan_column(getattr(snapshot, "feature_names", None))
         edge_feat = build_pair_edge_features(
             snapshot.node_features, pairs, snapshot.uav_aoi,
-            mode=self.cfg.features.pair_edge_features,
-            window_s=self.cfg.data.lookahead_seconds,
-            plan_col0=plan_column(getattr(snapshot, "feature_names", None)),
+            mode=mode, window_s=self.cfg.data.lookahead_seconds, plan_col0=plan_col0,
         )
+        gate_ctx = None
+        if getattr(self.head, "conformance_gate", False):
+            gate_ctx = {"node_features": snapshot.node_features, "pairs": pairs, "plan_col0": plan_col0,
+                        "uav_aoi": snapshot.uav_aoi, "rec_state": rec_state, "sync": mode_uses_sync(mode)}
         return self.head(
             node_emb[pairs[0]], node_emb[pairs[1]],
             rec_state[pairs[0]], rec_state[pairs[1]],
-            edge_feat=edge_feat,
+            edge_feat=edge_feat, gate_ctx=gate_ctx,
         )
 
     def _to_device(self, snapshot: TKGSnapshot) -> TKGSnapshot:

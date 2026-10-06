@@ -77,14 +77,25 @@ METHODS: Dict[str, MethodSpec] = {
                                      group="ablation",
                                      description="UAV nodes + approaches edges only (no context streams)."),
     "abl_no_plan": MethodSpec("abl_no_plan", "trgat", _chain(_set("features.plan_context", False),
-                                                             _set("features.pair_edge_features", "geometry")),
+                                                             _set("features.pair_edge_features", "geometry"),
+                                                             _set("model.use_conformance_gate", False)),
                               group="ablation",
-                              description="Observation-only UAV and pair features (no filed-plan context; = S8c setting)."),
+                              description="Observation-only UAV and pair features (no filed-plan context, no gate)."),
+    # ---- S8e ablations ------------------------------------------------------
+    "abl_no_conf_gate": MethodSpec("abl_no_conf_gate", "trgat", _set("model.use_conformance_gate", False),
+                                   group="ablation",
+                                   description="No intent-conformance gate (plan geometry only in e_ij)."),
+    "abl_no_sync": MethodSpec("abl_no_sync", "trgat", _set("features.pair_edge_features", "geometry_plan"),
+                              group="ablation",
+                              description="No AoI synchronisation of the reports (S8d pair features)."),
+    "abl_tbptt": MethodSpec("abl_tbptt", "trgat", _set("training.tbptt_detach", True), group="ablation",
+                            description="GRU state detached after every snapshot (legacy truncated BPTT)."),
     # abl_no_temporal == TR-GAT-NT (reused, not re-run)
 }
 
 MAIN_METHODS: List[str] = ["TR-GAT", "TR-GAT-NT", "GAT-S", "STGCN", "LSTM-P", "Tfm-P", "CPA-Rule", "Plan-CPA", "VO"]
-ABLATION_METHODS: List[str] = ["abl_no_gating", "abl_no_gru", "abl_bce", "abl_telemetry_only", "abl_no_plan"]
+ABLATION_METHODS: List[str] = ["abl_no_gating", "abl_no_gru", "abl_bce", "abl_telemetry_only", "abl_no_plan",
+                               "abl_no_conf_gate", "abl_no_sync", "abl_tbptt"]
 TRAINED_MAIN_METHODS: List[str] = ["TR-GAT", "TR-GAT-NT", "GAT-S", "STGCN", "LSTM-P", "Tfm-P"]
 
 

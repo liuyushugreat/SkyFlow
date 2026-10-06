@@ -9,6 +9,7 @@ model:
   use_temporal: true        # false -> TR-GAT-NT (no φ(δ))
   use_gating: true          # false -> abl_no_gating
   use_gru: true             # false -> abl_no_gru
+  use_conformance_gate: true  # S8e: intent-conformance gate in the TR-GAT head; false -> abl_no_conf_gate
 
 data:
   num_uavs: 500
@@ -41,7 +42,10 @@ features:
   plan_context: true        # S8d: filed flight-plan context in UAV features (next waypoint + planned position
                             #   +10/+20/+30 s along the filed route, relative to the observed position; zero for
                             #   non-cooperative UAVs). false = 20-d observation-only features (S8c reference run)
-  pair_edge_features: geometry_plan  # e_ij for ALL learned scorers. geometry_plan (S8d) = geometry + planned pair
+  pair_edge_features: geometry_plan_sync  # e_ij for ALL learned scorers (and AoI sync for both CPA rules).
+                                #   geometry_plan_sync (S8e) = geometry_plan after dead-reckoning every report to the
+                                #   common epoch with its own AoI (p' = p + v*AoI) + the two ages (22-d).
+                                #   geometry_plan (S8d) = geometry + planned pair
                                 #   separations at +10/+20/+30 s from the filed plans (what Plan-CPA sees).
                                 #   geometry (S8c) = [dp,dv,delta] + observed-state CPA geometry (t_cpa, d_cpa_h,
                                 #   |dz_cpa|, range, closing speed; same inputs as CPA-Rule, no label info).
@@ -72,8 +76,12 @@ sim:
     wind_deviation: 0.06    # persistent 2-4 m/s cross-track drift
     priority_insertion: 0.03  # emergency flight entering at t=10-30 s straight through a hub
     noncooperative: 0.03    # no ADS-B: +3 s surveillance latency, 4x position noise
-  adsb_latency_s: [0.5, 1.2]  # per-UAV link latency, scalar or [lo, hi]
-  packet_loss: 0.0          # per-report loss probability
+  adsb_latency_s: [0.5, 1.2]  # per-UAV link latency, scalar or [lo, hi] (used when link_mix is null)
+  packet_loss: 0.0          # per-report loss probability (used when link_mix is null)
+  link_mix:                 # S8e: heterogeneous links - every scenario draws its own condition from its seed
+    packet_loss: [0.0, 0.3]
+    latency_lo_s: [0.3, 0.8]
+    latency_hi_s: [1.0, 3.0]
   gps_cep_m: 2.5
   weather_update_s: 5.0
   registry_update_s: 10.0
@@ -90,7 +98,9 @@ training:
   loss: focal               # focal | bce (abl_bce)
   conflict_threshold: 0.42  # used only when threshold_mode = fixed
   threshold_mode: val       # S8: pick the F1-optimal threshold on val per model, freeze it for test (fixed = legacy)
-  warmup_steps: 1000
+  warmup_steps: 200         # S8e: ~1 epoch at batch_windows=1 (1000 = 4 epochs of near-zero lr; S8c/S8d setting)
+  scheduler: warmup_cosine  # S8e: identical schedule for TR-GAT and every learned baseline (none = constant lr)
+  tbptt_detach: false       # S8e: back-propagate through the GRU state across the K-snapshot window (true = legacy)
   seed: 42
   num_seeds: 5
   seeds: [42, 123, 456, 789, 1024]

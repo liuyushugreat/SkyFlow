@@ -22,6 +22,11 @@ class ModelConfig:
     use_temporal: bool = True       # False -> TR-GAT-NT: φ(δ) removed from attention
     use_gating: bool = True         # False -> uniform relation average instead of g_r(h_i)
     use_gru: bool = True            # False -> per-snapshot projection, no recurrence
+    # S8e: intent-conformance gate in the scoring head (TR-GAT only): a per-UAV
+    # weight w_i from the recurrent state and the plan/telemetry residual mixes
+    # the filed-plan trajectory with linear extrapolation before the pair
+    # geometry is computed. False -> abl_no_conf_gate. Needs features.plan_context.
+    use_conformance_gate: bool = True
 
 
 @dataclass
@@ -63,12 +68,15 @@ class FeaturesConfig:
     leakage_free: bool = True       # drop d_min/t_cpa/f_avoid and conflicts_with
     input_set: str = "full"         # "full" | "telemetry_only" (S6)
     normalize_inputs: bool = True   # S8: standardise node features with train-split mean/std (False = raw, legacy)
-    # S8c/S8d: pair feature e_ij given to *every* learned scorer.
-    #   "geometry_plan" (default) geometry + planned pair separations from the filed plans (needs plan_context)
-    #   "geometry"      kinematics + observed-state CPA geometry (t_cpa, d_cpa, range, closing speed)
-    #   "kinematics"    [dp, dv, delta] only          (legacy TR-GAT)
-    #   "none"          no pair feature, [h_i, h_j] only (legacy baselines)
-    pair_edge_features: str = "geometry_plan"
+    # S8c/S8d/S8e: pair feature e_ij given to *every* learned scorer (and the AoI
+    # synchronisation to both CPA rules).
+    #   "geometry_plan_sync" (default) geometry_plan computed after dead-reckoning every report to the
+    #                        common epoch with its own AoI (p' = p + v*AoI), plus the two ages
+    #   "geometry_plan"      geometry + planned pair separations from the filed plans (needs plan_context)
+    #   "geometry"           kinematics + observed-state CPA geometry (t_cpa, d_cpa, range, closing speed)
+    #   "kinematics"         [dp, dv, delta] only          (legacy TR-GAT)
+    #   "none"               no pair feature, [h_i, h_j] only (legacy baselines)
+    pair_edge_features: str = "geometry_plan_sync"
     # S8d: filed flight-plan context in the UAV features (next waypoint, planned
     # position +10/+20/+30 s along the filed route, relative to the observed
     # position). False = 20-d observation-only features (S8c reference run).
@@ -125,6 +133,14 @@ class SimConfig:
     })
     adsb_latency_s: List[float] = field(default_factory=lambda: [0.5, 1.2])  # scalar or [lo, hi]
     packet_loss: float = 0.0                  # per-report loss probability, 0–0.3
+    # S8e: heterogeneous surveillance links. When set, every scenario (train, val
+    # and test alike) draws its own link condition deterministically from its
+    # scenario seed: packet_loss ~ U(range), latency lo/hi ~ U(ranges). Explicit
+    # obs_params (robustness sweeps at fixed levels) still override. null = the
+    # fixed conditions above (S8c/S8d datasets).
+    link_mix: Optional[Dict[str, List[float]]] = field(default_factory=lambda: {
+        "packet_loss": [0.0, 0.3], "latency_lo_s": [0.3, 0.8], "latency_hi_s": [1.0, 3.0],
+    })
     gps_cep_m: float = 2.5
     weather_update_s: float = 5.0
     registry_update_s: float = 10.0
@@ -145,7 +161,10 @@ class TrainingConfig:
     focal_alpha: float = 0.75
     loss: str = "focal"             # "focal" | "bce" (abl_bce)
     conflict_threshold: float = 0.42
-    warmup_steps: int = 1000
+    warmup_steps: int = 200         # S8e: ~1 epoch at batch_windows=1 (was 1000 = 4 epochs of near-zero lr)
+    scheduler: str = "warmup_cosine"  # S8e: same schedule for TR-GAT and every learned baseline ("none" = constant lr)
+    tbptt_detach: bool = False      # S8e: False = back-propagate through the GRU state over the K-snapshot window;
+                                    #      True = legacy (state detached after every snapshot)
     seed: int = 42
     num_seeds: int = 5
     seeds: List[int] = field(default_factory=lambda: [42, 123, 456, 789, 1024])
@@ -274,6 +293,7 @@ class SkyFlowConfig:
             density_preset=getattr(sim, "density_preset", "dense"),
             cause_mix=getattr(sim, "cause_mix", None),
             packet_loss=obs.packet_loss,
+            link_mix=getattr(sim, "link_mix", None),
             weather_update_s=obs.weather_update_s,
             registry_update_s=obs.registry_update_s,
             corridor_update_s=obs.corridor_update_s,

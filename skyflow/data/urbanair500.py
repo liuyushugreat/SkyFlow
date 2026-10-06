@@ -41,7 +41,7 @@ so ``observe(log, e, params)`` is a pure function and observation conditions
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Dict, Iterator, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
@@ -82,6 +82,7 @@ NONCONFORMING_LEG_PROB = 0.6              # probability that a given leg deviate
 PRIORITY_INSERTION_START_S = (10.0, 30.0)
 PRIORITY_INSERTION_SPEED_MPS = (20.0, 25.0)
 NONCOOP_EXTRA_LATENCY_S = 3.0             # surveillance-sensor latency added for non-cooperative UAVs
+LINK_MIX_KEYS = ("packet_loss", "latency_lo_s", "latency_hi_s")   # S8e per-scenario link conditions
 NONCOOP_NOISE_FACTOR = 4.0                # and coarser position estimates
 
 
@@ -322,6 +323,7 @@ class UrbanAir500:
         corridor_update_s: float = 1.0,
         density_preset: str = "dense",
         cause_mix: Optional[Dict[str, float]] = "default",
+        link_mix: Optional[Dict[str, Sequence[float]]] = None,
     ):
         if label_mode not in LABEL_MODES:
             raise ValueError(f"label_mode must be one of {LABEL_MODES}, got {label_mode!r}")
@@ -360,9 +362,52 @@ class UrbanAir500:
             registry_update_s=registry_update_s,
             corridor_update_s=corridor_update_s,
         )
+        self.link_mix = self._validate_link_mix(link_mix)
 
         self.rng = np.random.RandomState(seed)
         self._init_infrastructure()
+
+    # ------------------------------------------------------------------ #
+    # S8e: heterogeneous surveillance links (per-scenario observation params)
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    def _validate_link_mix(link_mix) -> Optional[Dict[str, Tuple[float, float]]]:
+        if not link_mix:
+            return None
+        out = {}
+        for key in LINK_MIX_KEYS:
+            rng = link_mix.get(key)
+            if rng is None:
+                continue
+            lo, hi = float(rng[0]), float(rng[1])
+            if hi < lo:
+                raise ValueError(f"link_mix[{key!r}] must be [lo, hi] with lo <= hi, got {rng}")
+            out[key] = (lo, hi)
+        unknown = set(link_mix) - set(LINK_MIX_KEYS)
+        if unknown:
+            raise ValueError(f"unknown link_mix keys {sorted(unknown)}; allowed {LINK_MIX_KEYS}")
+        return out or None
+
+    def scenario_obs_params(self, log: "TruthLog") -> ObservationParams:
+        """Observation conditions of one scenario: the fixed ``obs_params`` unless
+        ``link_mix`` is set, in which case packet loss and the latency range are
+        drawn deterministically from the scenario seed (same draw for every
+        split, method and run)."""
+        base = self.obs_params
+        if self.link_mix is None or log.scenario_id is None:
+            return base
+        split, idx = log.scenario_id
+        rng = np.random.RandomState(scenario_seed(self.base_seed, split, idx) + 2)
+        lo, hi = base.latency_range()
+        loss = base.packet_loss
+        if "packet_loss" in self.link_mix:
+            loss = float(rng.uniform(*self.link_mix["packet_loss"]))
+        if "latency_lo_s" in self.link_mix:
+            lo = float(rng.uniform(*self.link_mix["latency_lo_s"]))
+        if "latency_hi_s" in self.link_mix:
+            hi = float(rng.uniform(*self.link_mix["latency_hi_s"]))
+        hi = max(hi, lo)
+        return replace(base, adsb_latency_s=(lo, hi), packet_loss=loss)
 
     # ------------------------------------------------------------------ #
     # Static infrastructure
@@ -1052,9 +1097,10 @@ class UrbanAir500:
         if candidates not in CANDIDATE_MODES:
             raise ValueError(f"candidates must be one of {CANDIDATE_MODES}, got {candidates!r}")
         builder = builder if builder is not None else TKGBuilder()
-        params = obs_params if obs_params is not None else self.obs_params
         dataset = []
         for log in logs:
+            # explicit obs_params (robustness sweeps) > per-scenario link mix > fixed defaults
+            params = obs_params if obs_params is not None else self.scenario_obs_params(log)
             if log.infrastructure is not None:
                 self.load_infrastructure(log.infrastructure)
             if log.scenario_id is not None:          # deterministic legacy negative sampling

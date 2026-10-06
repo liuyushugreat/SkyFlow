@@ -109,10 +109,11 @@ class TestModes:
         assert torch.allclose(g[:, :7], k)          # geometry is a superset of kinematics
         assert k[0, 6].item() == pytest.approx(1.5)
 
-    def test_default_config_is_geometry_plan_and_legacy_modes_exist(self):
+    def test_default_config_is_geometry_plan_sync_and_legacy_modes_exist(self):
         cfg = SkyFlowConfig()
-        assert cfg.features.pair_edge_features == "geometry_plan"
+        assert cfg.features.pair_edge_features == "geometry_plan_sync"
         assert pair_edge_feature_dim("geometry_plan") == 20
+        assert pair_edge_feature_dim("geometry_plan_sync") == 22
         cfg.features.pair_edge_features = "none"
         assert pair_edge_feature_dim(cfg.features.pair_edge_features) == 0
 

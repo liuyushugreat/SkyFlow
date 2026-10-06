@@ -30,15 +30,27 @@ DEFAULT_H_GRID: Tuple[float, ...] = (10.0, 15.0, 20.0, 30.0, 40.0, 60.0, 80.0)
 DEFAULT_V_GRID: Tuple[float, ...] = (3.0, 5.0, 8.0, 10.0, 15.0)
 
 
-def _pair_kinematics(snapshot: TKGSnapshot):
+def _uav_state(snapshot: TKGSnapshot, aoi_sync: bool) -> Tuple[np.ndarray, np.ndarray]:
+    """Observed (P, V) of the UAV rows; with ``aoi_sync`` every report is first
+    dead-reckoned to the common epoch with its own age (P + V * AoI), the same
+    synchronisation the learned scorers receive in the ``*_sync`` pair modes."""
     feats = snapshot.node_features.detach().cpu().numpy()
     n = snapshot.num_uavs
+    P, V = feats[:n, 0:3].astype(np.float64), feats[:n, 3:6].astype(np.float64)
+    aoi = getattr(snapshot, "uav_aoi", None)
+    if aoi_sync and aoi is not None:
+        age = aoi.detach().cpu().numpy().astype(np.float64)[:n]
+        P = P + V * age[:, None]
+    return P, V
+
+
+def _pair_kinematics(snapshot: TKGSnapshot, aoi_sync: bool = False):
     pairs = snapshot.conflict_pairs
     if pairs is None or pairs.size(1) == 0:
         return None
     src = pairs[0].detach().cpu().numpy()
     dst = pairs[1].detach().cpu().numpy()
-    P, V = feats[:n, 0:3].astype(np.float64), feats[:n, 3:6].astype(np.float64)
+    P, V = _uav_state(snapshot, aoi_sync)
     dp = P[dst] - P[src]
     dv = V[dst] - V[src]
     return dp, dv
@@ -90,9 +102,11 @@ class CPARule:
         threshold_mode: str = "label",
         h_grid: Sequence[float] = DEFAULT_H_GRID,
         v_grid: Sequence[float] = DEFAULT_V_GRID,
+        aoi_sync: bool = False,
     ):
         if threshold_mode not in THRESHOLD_MODES:
             raise ValueError(f"threshold_mode must be one of {THRESHOLD_MODES}, got {threshold_mode!r}")
+        self.aoi_sync = bool(aoi_sync)      # S8e: dead-reckon each report to the common epoch first
         self.window_s = float(window_s)
         self.h_thresh = float(h_thresh)
         self.v_thresh = float(v_thresh)
@@ -106,7 +120,7 @@ class CPARule:
         """Piecewise-linear relative motion of every candidate pair as a list of
         (dp, dv, duration) segments. The plain rule has one segment: observed
         relative state extrapolated over the whole window."""
-        kin = _pair_kinematics(snapshot)
+        kin = _pair_kinematics(snapshot, self.aoi_sync)
         if kin is None:
             return None
         return [(kin[0], kin[1], self.window_s)]
@@ -182,6 +196,7 @@ class CPARule:
             "h_thresh": self.h_thresh,
             "v_thresh": self.v_thresh,
             "threshold_mode": self.threshold_mode,
+            "aoi_sync": self.aoi_sync,
         }
 
 
@@ -209,8 +224,7 @@ class PlanCPARule(CPARule):
             raise ValueError("PlanCPARule needs plan-context features (features.plan_context: true)")
         feats = snapshot.node_features.detach().cpu().numpy()
         n = snapshot.num_uavs
-        P = feats[:n, 0:3].astype(np.float64)
-        V = feats[:n, 3:6].astype(np.float64)
+        P, V = _uav_state(snapshot, self.aoi_sync)
         src = pairs[0].detach().cpu().numpy()
         dst = pairs[1].detach().cpu().numpy()
 

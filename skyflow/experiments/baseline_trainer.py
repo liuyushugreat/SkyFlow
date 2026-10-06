@@ -17,7 +17,7 @@ from skyflow.data.tkg_builder import TKGSnapshot
 from skyflow.training.io_utils import save_with_retry
 from skyflow.training.losses import build_loss
 from skyflow.training.metrics import ConflictMetrics, LatencyTimer, MetricResult
-from skyflow.training.trainer import selection_score
+from skyflow.training.trainer import build_scheduler, selection_score
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +77,10 @@ def train_baseline(model: nn.Module, train_data, val_data, cfg: SkyFlowConfig, d
     batch = max(int(getattr(tc, "batch_windows", 1)), 1) * cfg.data.observation_window  # snapshots per step
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=tc.learning_rate, weight_decay=tc.weight_decay)
+    # S8e: identical lr schedule to TR-GAT (warmup + cosine over the planned number of steps)
+    steps_per_epoch = max(int(np.ceil(len(train_data) / batch)), 1)
+    scheduler = build_scheduler(optimizer, getattr(tc, "scheduler", "warmup_cosine"),
+                                tc.warmup_steps, n_epochs * steps_per_epoch)
     criterion = build_loss(getattr(tc, "loss", "focal"), tc.focal_gamma, getattr(tc, "focal_alpha", 0.75))
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -114,6 +118,7 @@ def train_baseline(model: nn.Module, train_data, val_data, cfg: SkyFlowConfig, d
                 continue
             nn.utils.clip_grad_norm_(model.parameters(), tc.gradient_clip_norm)
             optimizer.step()
+            scheduler.step()
             total += total_loss / valid
             n_steps += 1
         epochs_run = epoch + 1
