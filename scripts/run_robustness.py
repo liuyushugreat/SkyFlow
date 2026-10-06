@@ -4,9 +4,15 @@ trained under the nominal condition are tested on the SAME truth scenarios
 re-observed under degraded ADS-B conditions (labels are unchanged because
 they depend only on the truth).
 
-  latency sweep : mean ADS-B latency L in {0, 0.5, 1, 2, 3} s, per-UAV latency
-                  ~ U(L(1-j), L(1+j)) with jitter j (--latency_jitter, 0.4)
-  loss sweep    : per-report loss probability in {0, 0.1, 0.2, 0.3} at nominal latency
+  latency sweep : mean ADS-B latency L in {0, 0.5, 1, 2, 3, 4, 5} s, per-UAV latency
+                  ~ U(L(1-j), L(1+j)) with jitter j (--latency_jitter, 0.4), no loss
+  loss sweep    : per-report loss probability in {0, 0.1, ..., 0.5} at the nominal
+                  latency (sim.adsb_latency_s)
+
+Each level is applied homogeneously to all test scenarios (the per-scenario
+``sim.link_mix`` used for training is switched off, otherwise the fixed level
+would be ignored).  Levels beyond the training mix (link_mix upper bounds)
+are flagged ``in_train_range = 0`` so the paper can mark extrapolation.
 
 Outputs results/robustness_latency.csv and results/robustness_loss.csv
 (one row per condition x method x seed) plus a .json with provenance.
@@ -30,22 +36,42 @@ from skyflow.data.cache import cache_key, get_split
 from skyflow.experiments.env_info import env_info
 from skyflow.experiments.loader import list_tasks, load_task
 
-DEFAULT_METHODS = ["TR-GAT", "TR-GAT-NT", "GAT-S", "CPA-Rule", "Plan-CPA"]
-FIELDS = ["sweep", "value", "adsb_latency_lo_s", "adsb_latency_hi_s", "packet_loss", "method", "kind", "seed",
-          "cdr", "far", "f1", "precision", "num_pairs", "num_positives", "num_missed_positives",
-          "test_snapshots", "cache_key"]
+DEFAULT_METHODS = ["TR-GAT", "TR-GAT-NT", "GAT-S", "STGCN", "CPA-Rule", "Plan-CPA"]
+DEFAULT_LATENCIES = [0.0, 0.5, 1.0, 2.0, 3.0, 4.0, 5.0]
+DEFAULT_LOSSES = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5]
+FIELDS = ["sweep", "value", "adsb_latency_lo_s", "adsb_latency_hi_s", "packet_loss", "in_train_range",
+          "method", "kind", "seed", "cdr", "far", "f1", "precision", "auprc", "num_pairs", "num_positives",
+          "num_missed_positives", "test_snapshots", "cache_key"]
 
 
 def condition_cfg(base, sweep, value, jitter):
+    """Fixed, homogeneous observation condition for every test scenario."""
     cfg = copy.deepcopy(base)
+    cfg.sim.link_mix = None            # per-scenario draws would override the fixed level
     if sweep == "latency":
         lo, hi = max(value * (1 - jitter), 0.0), value * (1 + jitter)
         cfg.sim.adsb_latency_s = [float(lo), float(hi)]
+        cfg.sim.packet_loss = 0.0
     elif sweep == "loss":
         cfg.sim.packet_loss = float(value)
     else:
         raise ValueError(sweep)
     return cfg
+
+
+def in_train_range(base, sweep, cfg) -> int:
+    """1 if the condition lies inside the training link mix (or equals the
+    fixed training condition when no mix was used), else 0."""
+    mix = getattr(base.sim, "link_mix", None)
+    if sweep == "latency":
+        hi = cfg.sim.adsb_latency_s[1]
+        if mix and "latency_hi_s" in mix:
+            return int(hi <= float(mix["latency_hi_s"][1]) + 1e-9)
+        lat = base.sim.adsb_latency_s
+        return int(hi <= float(lat[1] if isinstance(lat, (list, tuple)) else lat) + 1e-9)
+    if mix and "packet_loss" in mix:
+        return int(cfg.sim.packet_loss <= float(mix["packet_loss"][1]) + 1e-9)
+    return int(cfg.sim.packet_loss <= float(base.sim.packet_loss) + 1e-9)
 
 
 def main():
@@ -54,8 +80,8 @@ def main():
     ap.add_argument("--out_dir", default="results")
     ap.add_argument("--methods", nargs="+", default=DEFAULT_METHODS)
     ap.add_argument("--seeds", nargs="+", type=int, default=None)
-    ap.add_argument("--latencies", nargs="+", type=float, default=[0.0, 0.5, 1.0, 2.0, 3.0])
-    ap.add_argument("--losses", nargs="+", type=float, default=[0.0, 0.1, 0.2, 0.3])
+    ap.add_argument("--latencies", nargs="+", type=float, default=DEFAULT_LATENCIES)
+    ap.add_argument("--losses", nargs="+", type=float, default=DEFAULT_LOSSES)
     ap.add_argument("--latency_jitter", type=float, default=0.4)
     ap.add_argument("--sweeps", nargs="+", default=["latency", "loss"], choices=["latency", "loss"])
     ap.add_argument("--device", default="auto")
@@ -94,8 +120,9 @@ def main():
                 lo, hi = (lat if isinstance(lat, (list, tuple)) else (lat, lat))
                 rows.append({
                     "sweep": sweep, "value": v, "adsb_latency_lo_s": lo, "adsb_latency_hi_s": hi,
-                    "packet_loss": cfg.sim.packet_loss, "method": lm.method, "kind": lm.kind, "seed": lm.seed,
-                    "cdr": res.cdr, "far": res.far, "f1": res.f1, "precision": res.precision,
+                    "packet_loss": cfg.sim.packet_loss, "in_train_range": in_train_range(lm.cfg, sweep, cfg),
+                    "method": lm.method, "kind": lm.kind, "seed": lm.seed,
+                    "cdr": res.cdr, "far": res.far, "f1": res.f1, "precision": res.precision, "auprc": res.auprc,
                     "num_pairs": res.num_pairs, "num_positives": res.num_positives,
                     "num_missed_positives": res.num_missed_positives, "test_snapshots": len(test), "cache_key": k,
                 })

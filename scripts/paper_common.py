@@ -77,6 +77,9 @@ class Results:
         self.scaling_fit = self._json(R / "scaling_fit.json")
         self.attention = self._csv(R / "attention_vs_aoi.csv")
         self.gate = self._csv(R / "gate_by_cause.csv")              # S8e intent-conformance gate
+        self.events = self._csv(R / "events_summary.csv")           # S8f event-level metrics (per method x persistence)
+        self.events_cause = self._csv(R / "events_by_cause.csv")
+        self.events_meta = self._json(R / "events.json")
         self.main_dir = R / "main" if (R / "main").is_dir() else R   # per-task metrics.json live here
 
     @staticmethod
@@ -112,3 +115,14 @@ class Results:
         if not self.tests:
             return None
         return self.tests.get(f"paired_t_{metric}", {}).get(method, {}).get("p_bonferroni")
+
+    def events_rows(self, persistence=1):
+        """Event-level summary rows (dict per method) at one persistence level."""
+        if self.events is None:
+            return {}
+        d = self.events[self.events["persistence"] == persistence]
+        return {r["method"]: r.to_dict() for _, r in d.iterrows()}
+
+    def events_p_value(self, metric, method, persistence=1):
+        t = (self.events_meta or {}).get("tests", {}).get(f"persistence_{persistence}", {})
+        return t.get(f"paired_t_{metric}", {}).get(method, {}).get("p_bonferroni")

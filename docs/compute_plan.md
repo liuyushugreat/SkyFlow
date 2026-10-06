@@ -275,6 +275,32 @@ config; `metrics.json.config_path` still names the former `trgat_compact.yaml`).
 18:49 (`logs/chain_s8e.log`): main 9 methods x 3 seeds → 8 ablations x 3 seeds (most important first)
 → S15 → paper build → Balanced power plan. Expected ≈ 25–30 h.
 
+## 11. S8f (10-06 evening): event-level metrics, extrapolating robustness sweep, CPU latency
+
+Evaluation-only additions (no label / model / training change; the S8e chain keeps running):
+
+- `skyflow/experiments/events.py` + `scripts/eval_events.py`: operators reason in conflict *events*
+  (maximal run of positive snapshots of a pair), not pair-snapshots. Reported per method x seed:
+  event CDR, timely CDR (first alert with ttc >= 10 s, among events where that was possible), lead
+  time at first alert, alert-episode precision, false alert episodes per UAV-hour, and the same with a
+  3-of-3 persistence filter (`--persistence 1 3`). Paired t-tests vs TR-GAT (Bonferroni) in
+  `results/events.json`. Probe on the three finished TR-GAT seeds (`results/_events_probe`, not
+  committed): 3,530 events / 83.3 UAV-h; event CDR 0.855±0.001, timely 0.723, lead median 22.0 s,
+  episode precision 0.255, 209 false episodes per UAV-h (42.4 true events per UAV-h); persistence 3
+  trades event CDR 0.739 for 86.5 false episodes/UAV-h. Alerts flicker (~2 episodes per detected event).
+- `scripts/run_robustness.py`: the sweep now switches `sim.link_mix` off (otherwise the per-scenario
+  draw silently overrode the fixed level), covers latency {0..5} s and loss {0..0.5} (training mix tops
+  out at 3 s / 0.3; rows flagged `in_train_range`), adds STGCN and AUPRC. Figures shade the
+  extrapolation region; macros `\cdrLat<M>InMax`, `\cdrLatOodDrop<M>`, ...
+- `scripts/run_s15.ps1`: stages `events` and `cpulat` (TR-GAT seed 42 inference on CPU,
+  `results/eval_cpu`) added; `make_tables` writes `tab_events.tex`, `make_figures` writes `fig_lead.pdf`,
+  `make_macros` adds `\ev...` and `\latCpu...` macros.
+
+Verification: `pytest -q` 164 passed (`tests/test_events_s8f.py`: hand-built event table with exact
+counts, oracle / silent detectors, gap and scenario-boundary handling, persistence filter, window grouping
+identical to the trainer, TR-GAT per-snapshot scores reproduce `evaluate()` TP/FP/FN, rule + learned
+baselines run, robustness condition overrides link_mix / changes the cache key / OOD flag).
+
 ## Conclusion
 
 **Do not rent: the local 4090 (2 concurrent tasks) finishes the main experiment and 3-seed ablations by about 10-07 evening even if every run goes to 150 epochs.**

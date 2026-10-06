@@ -4,6 +4,7 @@
 
   tab_main.tex      methods x (CDR, FAR, F1, AUPRC, P95 latency, hard-regime CDR); best per column bold
   tab_ablation.tex  TR-GAT variants x (CDR, FAR, F1, dF1, p)
+  tab_events.tex    methods x event-level metrics (event CDR, timely CDR, lead, episode precision, false ep./UAV-h)
   tab_setup.tex     ~10-row experimental setup (dataset, labels, model, training, hardware)
 """
 
@@ -124,6 +125,46 @@ def tab_ablation(res: Results, out: Path):
     _write(out, f"% auto-generated from {res.dir}; do not edit\n" + "\n".join(lines) + "\n")
 
 
+# --------------------------------------------------------------------------- event-level table (S8f)
+def tab_events(res: Results, out: Path, methods, persistence=1):
+    rows = res.events_rows(persistence)
+    rows = [(m, rows[m]) for m in methods if m in rows]
+    if not rows:
+        print("[skip] events table: no events_summary.csv"); return
+    ref = (res.events_meta or {}).get("reference", "TR-GAT")
+    lead_s = (res.events_meta or {}).get("lead_s", 10)
+    cols = {
+        "ev": ([r["event_cdr_mean"] for _, r in rows], True),
+        "tm": ([r["timely_cdr_mean"] for _, r in rows], True),
+        "ld": ([r["lead_median_s_mean"] for _, r in rows], True),
+        "pr": ([r["episode_precision_mean"] for _, r in rows], True),
+        "fa": ([r["false_episodes_per_uav_hour_mean"] for _, r in rows], False),
+    }
+    bold = {k: _bold_mask(v, hb) for k, (v, hb) in cols.items()}
+    head = ["Method", "Event CDR$\\uparrow$", f"Timely ($\\ge${lead_s:g}\\,s)$\\uparrow$", "Lead (s)$\\uparrow$",
+            "Episode prec.$\\uparrow$", "False ep./UAV-h$\\downarrow$"]
+    lines = ["\\begin{tabular}{lccccc}", "\\toprule", " & ".join(head) + " \\\\", "\\midrule"]
+    for i, (m, r) in enumerate(rows):
+        ev = fmt_pm(r["event_cdr_mean"], r["event_cdr_std"])
+        if m != ref:
+            p = res.events_p_value("event_cdr", m, persistence)
+            if p is not None and math.isfinite(p):
+                ev += "$^{*}$" if p < 0.05 else "$^{\\dagger}$"
+        cells = [tex_escape(m) if m != ref else f"\\textbf{{{tex_escape(m)}}}",
+                 _b(ev, bold["ev"][i]),
+                 _b(fmt_pm(r["timely_cdr_mean"], r["timely_cdr_std"]), bold["tm"][i]),
+                 _b(fmt(r["lead_median_s_mean"], 1), bold["ld"][i]),
+                 _b(fmt_pm(r["episode_precision_mean"], r["episode_precision_std"]), bold["pr"][i]),
+                 _b(fmt(r["false_episodes_per_uav_hour_mean"], 1), bold["fa"][i])]
+        lines.append(" & ".join(cells) + " \\\\")
+    lines += ["\\bottomrule", "\\end{tabular}"]
+    n_ev = rows[0][1].get("n_events")
+    note = (f"% auto-generated from {res.dir}; do not edit\n"
+            f"% persistence M={persistence}; events={n_ev}; UAV-hours={rows[0][1].get('uav_hours')}; "
+            f"* : p<0.05 vs {ref} on event CDR (paired t over seeds, Bonferroni)\n")
+    _write(out, note + "\n".join(lines) + "\n")
+
+
 # --------------------------------------------------------------------------- setup table
 def tab_setup(res: Results, cfg_path: Path, out: Path):
     cfg = asdict(SkyFlowConfig.from_yaml(str(cfg_path)))     # merged with defaults (partial yaml allowed)
@@ -171,6 +212,7 @@ def main():
     O = Path(args.out_dir)
     tab_main(res, O / "tab_main.tex", args.methods)
     tab_ablation(res, O / "tab_ablation.tex")
+    tab_events(res, O / "tab_events.tex", args.methods)
     tab_setup(res, Path(args.config), O / "tab_setup.tex")
 
 

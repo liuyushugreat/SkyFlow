@@ -117,6 +117,21 @@ def main():
             if env.get(k):
                 M.add(macro_name("env", k), str(env[k]).replace("_", "\\_"))
 
+    # ---- CPU-only inference latency (S8f; results/eval_cpu/<method>/seed*.json) ----
+    for p in sorted((res.dir / "eval_cpu").glob("*/seed*.json")) if (res.dir / "eval_cpu").is_dir() else []:
+        j = json.load(open(p, encoding="utf-8"))
+        m, lat = j["method"], j.get("latency", {})
+        inf, gb = lat.get("inference", {}), lat.get("graph_build", {})
+        key = macro_name("latCpu", m)
+        if key + "Fwd" in M.names:          # one seed per method is enough
+            continue
+        M.num(key + "Fwd", inf.get("gnn_forward_p95_ms"), 1)
+        M.num(key + "Score", inf.get("pair_scoring_p95_ms"), 1)
+        M.num(key + "Build", gb.get("graph_build_p95_ms"), 1)
+        M.num(key + "Sum", lat.get("p95_sum_ms"), 1)
+        if j.get("env", {}).get("cpu_model"):
+            M.add(key + "Host", str(j["env"]["cpu_model"]).replace("_", "\\_"))
+
     # ---- configuration facts (from the run's own config.yaml, merged with defaults) ----
     cfg_path = next(iter(sorted(res.main_dir.glob(f"{ref}/seed*/config.yaml"))), None) or Path(args.config)
     try:
@@ -176,6 +191,23 @@ def main():
             gf = dm.groupby("value")["f1"].mean()
             M.num(macro_name(f"fOne{tag}", m, "Min"), float(gf.loc[xs[0]]))
             M.num(macro_name(f"fOne{tag}", m, "Max"), float(gf.loc[xs[-1]]))
+            if "auprc" in dm.columns:
+                ga = dm.groupby("value")["auprc"].mean()
+                M.num(macro_name(f"auprc{tag}", m, "Min"), float(ga.loc[xs[0]]))
+                M.num(macro_name(f"auprc{tag}", m, "Max"), float(ga.loc[xs[-1]]))
+            # S8f: largest level inside the training link mix vs the extrapolation levels
+            if "in_train_range" in dm.columns and (dm["in_train_range"] == 1).any() and (dm["in_train_range"] == 0).any():
+                x_in = max(dm[dm["in_train_range"] == 1]["value"])
+                v_in = float(g.loc[x_in])
+                M.num(macro_name(f"cdr{tag}", m, "InMax"), v_in)
+                M.add(macro_name(f"cdr{tag}OodDrop", m), f"{v_in - hi:+.3f}")
+                if v_in > 0:
+                    M.add(macro_name(f"cdr{tag}OodDropPct", m), f"{(v_in - hi) / v_in * 100:.1f}")
+                if "auprc" in dm.columns:
+                    M.num(macro_name(f"auprc{tag}", m, "InMax"), float(ga.loc[x_in]))
+        if "in_train_range" in df.columns and (df["in_train_range"] == 0).any():
+            M.add(f"rob{tag}TrainMax", f"{max(df[df['in_train_range'] == 1]['value']) * scale:g}")
+            M.add(f"rob{tag}OodLevels", ", ".join(f"{x * scale:g}" for x in sorted(df[df["in_train_range"] == 0]["value"].unique())))
 
     # ---- scaling --------------------------------------------------------
     if res.scaling_fit is not None:
@@ -217,6 +249,43 @@ def main():
                 M.num(macro_name("attnStale", rel), g.iloc[-1]["attn_norm_mean"])
                 M.add(macro_name("attnRatio", rel), f"{g.iloc[0]['attn_norm_mean'] / max(g.iloc[-1]['attn_norm_mean'], 1e-9):.2f}")
                 M.add(macro_name("attnStaleDelta", rel), f"{g.iloc[-1]['delta_bin_hi_s']:g}")
+
+    # ---- event-level metrics (S8f) --------------------------------------
+    # \evCdr<M>, \evTimely<M>, \evLeadMed<M>, \evLeadMean<M>, \evPrec<M>, \evFaH<M> (false episodes per UAV-hour),
+    # \evPCdr<M> (Bonferroni p vs reference); persistence M>1 adds the suffix P<M>, e.g. \evCdrPThreeTrGat.
+    if res.events is not None:
+        meta = res.events_meta or {}
+        M.add("evLeadS", f"{float(meta.get('lead_s', 10)):g}")
+        for P in sorted(res.events["persistence"].unique()):
+            P = int(P)
+            sfx = "" if P == 1 else "P" + num_word(P)
+            rows = res.events_rows(P)
+            for m, r in rows.items():
+                for key, col, nd in (("evCdr", "event_cdr_mean", 3), ("evCdrStd", "event_cdr_std", 3),
+                                     ("evTimely", "timely_cdr_mean", 3), ("evLeadMed", "lead_median_s_mean", 1),
+                                     ("evLeadMean", "lead_mean_s_mean", 1), ("evLeadFrac", "lead_frac_mean", 2),
+                                     ("evPrec", "episode_precision_mean", 3),
+                                     ("evFaH", "false_episodes_per_uav_hour_mean", 1),
+                                     ("evFaDur", "false_episode_dur_mean_s_mean", 1)):
+                    M.num(macro_name(key + sfx, m), r.get(col), nd)
+                if m != ref:
+                    p = res.events_p_value("event_cdr", m, P)
+                    if _num_ok(p):
+                        M.add(macro_name("evPCdr" + sfx, m), fmt_p(float(p)))
+                    p = res.events_p_value("false_episodes_per_uav_hour", m, P)
+                    if _num_ok(p):
+                        M.add(macro_name("evPFaH" + sfx, m), fmt_p(float(p)))
+            if P == 1 and rows:
+                any_row = next(iter(rows.values()))
+                M.add("evNEvents", f"{int(any_row['n_events']):,}".replace(",", "\\,"))
+                M.add("evUavHours", f"{float(any_row['uav_hours']):.1f}")
+                M.add("evPerUavHour", f"{float(any_row['n_events']) / float(any_row['uav_hours']):.1f}")
+        if res.events_cause is not None:
+            c = res.events_cause[res.events_cause["persistence"] == 1] if "persistence" in res.events_cause else res.events_cause
+            g = c.groupby(["method", "cause"])[["event_cdr", "timely_cdr", "lead_median_s"]].mean().reset_index()
+            for _, r in g.iterrows():
+                M.num(macro_name("evCdrCause", r["cause"], r["method"]), r["event_cdr"], 3)
+                M.num(macro_name("evLeadCause", r["cause"], r["method"]), r["lead_median_s"], 1)
 
     # ---- intent-conformance gate (S8e) ----------------------------------
     if res.gate is not None:

@@ -6,6 +6,7 @@ Outputs (PDF, single-column 3.5 in, 8 pt, TrueType fonts - no Type 3):
   fig_robustness.pdf    CDR vs ADS-B latency / packet loss, mean +- std over seeds
   fig_scaling.pdf       log-log P95 latency (total + 3 stages) vs N, fitted alpha, 200 ms budget line
   fig_attention_aoi.pdf in-degree-normalised attention vs AoI delta, one line per relation
+  fig_lead.pdf          fraction of conflict events alerted with >= x s lead (event-level, S8f)
 """
 
 import argparse
@@ -76,6 +77,15 @@ def fig_robustness(lat_csv, loss_csv, methods, out):
             ax.errorbar(g["x"], g["mean"], yerr=g["std"].fillna(0.0), marker=mk, ls=ls, capsize=1.5,
                         elinewidth=0.6, label=m)
             meta[f"{xlabel}|{m}"] = g.to_dict("records")
+        # S8f: shade the levels beyond the training link mix (extrapolation)
+        if "in_train_range" in d.columns and (d["in_train_range"] == 0).any() and (d["in_train_range"] == 1).any():
+            x_in = float(d[d["in_train_range"] == 1]["x"].max())
+            x_out = sorted(d[d["in_train_range"] == 0]["x"].unique())
+            edge = 0.5 * (x_in + x_out[0])
+            ax.axvspan(edge, x_out[-1] + 0.5 * (x_out[-1] - x_in) / max(len(x_out), 1), color="0.85", lw=0, zorder=0)
+            ax.text(0.98, 0.04, "beyond\ntraining", transform=ax.transAxes, fontsize=6, ha="right", va="bottom",
+                    color="0.35")
+            meta[f"{xlabel}|train_max"] = x_in
         ax.set_xlabel(xlabel)
         ax.grid(alpha=0.3, lw=0.4)
     axes[0].set_ylabel("CDR")
@@ -138,6 +148,41 @@ def fig_attention(csv, out, layer=None, min_edges=20):
     return {"layer": layer, "relations": rels}
 
 
+# --------------------------------------------------------------------------- lead time (S8f)
+def fig_lead(npz, events_csv, methods, out, persistence=1):
+    """Fraction of conflict events alerted with at least x seconds of lead
+    (per method, lead samples pooled over seeds; undetected events count as
+    lead 0, so the curve starts at the event CDR)."""
+    if not npz.exists() or not events_csv.exists():
+        print("[skip] no events artefacts"); return None
+    z = np.load(npz)
+    ev = pd.read_csv(events_csv)
+    ev = ev[ev["persistence"] == persistence]
+    fig, ax = plt.subplots(figsize=(COL_W, 1.7))
+    meta = {}
+    for m in methods:
+        keys = [k for k in z.files if k.startswith(f"{m}/seed") and k.endswith(f"/p{persistence}")]
+        if not keys:
+            continue
+        n_events = float(ev[ev["method"] == m]["n_events"].iloc[0]) if (ev["method"] == m).any() else None
+        leads = np.concatenate([z[k] for k in keys])
+        if n_events is None or n_events <= 0:
+            continue
+        per_seed_events = n_events * len(keys)
+        xs = np.linspace(0.0, max(float(leads.max()) if leads.size else 1.0, 1.0), 200)
+        frac = np.array([(leads >= x).sum() / per_seed_events for x in xs])
+        mk, ls = _style(m)
+        ax.plot(xs, frac, ls=ls, marker=mk, markevery=25, label=m)
+        meta[m] = {"n_seeds": len(keys), "frac_ge_0": float(frac[0]), "lead_median_s": float(np.median(leads)) if leads.size else None}
+    ax.set_xlabel("Lead time at first alert (s)")
+    ax.set_ylabel("Fraction of events")
+    ax.set_ylim(0, 1)
+    ax.grid(alpha=0.3, lw=0.4)
+    ax.legend(handlelength=1.8, loc="best")
+    _save(fig, out)
+    return meta
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--results_dir", default="results")
@@ -151,6 +196,7 @@ def main():
                                      O / "fig_robustness.pdf"),
         "scaling": fig_scaling(R / "scaling.csv", R / "scaling_fit.json", O / "fig_scaling.pdf"),
         "attention": fig_attention(R / "attention_vs_aoi.csv", O / "fig_attention_aoi.pdf", args.attention_layer),
+        "lead": fig_lead(R / "events_lead.npz", R / "events.csv", args.methods, O / "fig_lead.pdf"),
     }
     O.mkdir(parents=True, exist_ok=True)
     json.dump({"results_dir": str(R), **info}, open(O / "figures_provenance.json", "w"), indent=2, default=str)
