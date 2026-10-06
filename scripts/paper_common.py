@@ -9,16 +9,18 @@ from pathlib import Path
 import pandas as pd
 
 # display names and order used in the paper tables
-MAIN_ORDER = ["CPA-Rule", "VO", "LSTM-P", "Tfm-P", "GAT-S", "STGCN", "TR-GAT-NT", "TR-GAT"]
-ABL_ORDER = ["TR-GAT", "TR-GAT-NT", "abl_no_gating", "abl_no_gru", "abl_bce", "abl_telemetry_only"]
+MAIN_ORDER = ["CPA-Rule", "Plan-CPA", "VO", "LSTM-P", "Tfm-P", "GAT-S", "STGCN", "TR-GAT-NT", "TR-GAT"]
+ABL_ORDER = ["TR-GAT", "TR-GAT-NT", "abl_no_gating", "abl_no_gru", "abl_bce", "abl_telemetry_only", "abl_no_plan"]
 ABL_LABEL = {
     "TR-GAT": "TR-GAT (full)", "TR-GAT-NT": "w/o temporal encoding $\\phi(\\delta)$",
     "abl_no_gating": "w/o relation gating", "abl_no_gru": "w/o GRU state",
     "abl_bce": "BCE instead of focal loss", "abl_telemetry_only": "telemetry-only input",
+    "abl_no_plan": "w/o filed-plan context",
 }
 _CAMEL = {"TR-GAT": "TrGat", "TR-GAT-NT": "TrGatNt", "GAT-S": "GatS", "STGCN": "Stgcn", "LSTM-P": "LstmP",
-          "Tfm-P": "TfmP", "CPA-Rule": "CpaRule", "VO": "Vo", "abl_no_gating": "AblNoGating",
-          "abl_no_gru": "AblNoGru", "abl_bce": "AblBce", "abl_telemetry_only": "AblTelemetry"}
+          "Tfm-P": "TfmP", "CPA-Rule": "CpaRule", "Plan-CPA": "PlanCpa", "VO": "Vo", "abl_no_gating": "AblNoGating",
+          "abl_no_gru": "AblNoGru", "abl_bce": "AblBce", "abl_telemetry_only": "AblTelemetry",
+          "abl_no_plan": "AblNoPlan"}
 
 
 def macro_name(*parts):

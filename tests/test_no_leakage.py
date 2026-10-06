@@ -31,13 +31,18 @@ from skyflow.models.conflict_head import (
 
 class TestFeatureSet:
     def test_leakage_free_feature_names(self):
-        names = uav_feature_names(leakage_free=True)
+        names = uav_feature_names(leakage_free=True, plan_context=False)
         assert len(names) == 20
         for leak in LEAKING_FEATURES:
             assert leak not in names
+        # S8d default adds the 12-d filed-plan context, still no leaking feature
+        full = uav_feature_names(leakage_free=True)
+        assert len(full) == 32 and full[:20] == names
+        for leak in LEAKING_FEATURES:
+            assert leak not in full
 
     def test_legacy_feature_names_still_available(self):
-        names = uav_feature_names(leakage_free=False)
+        names = uav_feature_names(leakage_free=False, plan_context=False)
         assert len(names) == 23
         for leak in LEAKING_FEATURES:
             assert leak in names
@@ -45,7 +50,8 @@ class TestFeatureSet:
     def test_default_builder_is_leakage_free(self):
         b = TKGBuilder()
         assert b.leakage_free is True
-        assert b.feature_dim == 20
+        assert b.feature_dim == 32
+        assert TKGBuilder(plan_context=False).feature_dim == 20
         assert b.num_relations == 5
 
 
@@ -66,6 +72,9 @@ class TestDimensionsAdapt:
     def test_config_derived_dims(self):
         cfg = SkyFlowConfig()
         assert cfg.leakage_free() is True
+        assert cfg.plan_context() is True
+        assert cfg.uav_feature_dim() == 32
+        cfg.features.plan_context = False
         assert cfg.uav_feature_dim() == 20
         assert cfg.num_relations() == 5
         cfg.features.leakage_free = False
@@ -80,7 +89,7 @@ class TestDimensionsAdapt:
         plans = sim.generate_flight_plans(25)
         log = sim.run_physics(plans, 1.0, extra_seconds=0.0)
         snap = cfg.make_builder().build(sim.observe(log, 5))
-        assert snap.node_features.shape[1] == 20
+        assert snap.node_features.shape[1] == 32
         assert all(k < 5 for k in snap.edge_indices)
         model = TRGAT(node_feature_dim=cfg.uav_feature_dim(),
                       num_relations=cfg.num_relations())

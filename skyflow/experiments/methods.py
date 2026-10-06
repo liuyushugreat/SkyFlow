@@ -55,6 +55,8 @@ METHODS: Dict[str, MethodSpec] = {
     "LSTM-P": MethodSpec("LSTM-P", "learned", _identity, baseline_name="LSTM-P", group="main"),
     "Tfm-P": MethodSpec("Tfm-P", "learned", _identity, baseline_name="Tfm-P", group="main"),
     "CPA-Rule": MethodSpec("CPA-Rule", "rule", _identity, baseline_name="CPA-Rule", group="main"),
+    "Plan-CPA": MethodSpec("Plan-CPA", "rule", _identity, baseline_name="Plan-CPA", group="main",
+                           description="CPA interval test along the filed-plan polyline (S8d)."),
     "VO": MethodSpec("VO", "rule", _identity, baseline_name="VO", group="main"),
     # ---- ablations (TR-GAT variants) ---------------------------------------
     "abl_no_gating": MethodSpec("abl_no_gating", "trgat", _set("model.use_gating", False), group="ablation",
@@ -66,11 +68,13 @@ METHODS: Dict[str, MethodSpec] = {
     "abl_telemetry_only": MethodSpec("abl_telemetry_only", "trgat", _set("features.input_set", "telemetry_only"),
                                      group="ablation",
                                      description="UAV nodes + approaches edges only (no context streams)."),
+    "abl_no_plan": MethodSpec("abl_no_plan", "trgat", _set("features.plan_context", False), group="ablation",
+                              description="Observation-only UAV features (no filed-plan context)."),
     # abl_no_temporal == TR-GAT-NT (reused, not re-run)
 }
 
-MAIN_METHODS: List[str] = ["TR-GAT", "TR-GAT-NT", "GAT-S", "STGCN", "LSTM-P", "Tfm-P", "CPA-Rule", "VO"]
-ABLATION_METHODS: List[str] = ["abl_no_gating", "abl_no_gru", "abl_bce", "abl_telemetry_only"]
+MAIN_METHODS: List[str] = ["TR-GAT", "TR-GAT-NT", "GAT-S", "STGCN", "LSTM-P", "Tfm-P", "CPA-Rule", "Plan-CPA", "VO"]
+ABLATION_METHODS: List[str] = ["abl_no_gating", "abl_no_gru", "abl_bce", "abl_telemetry_only", "abl_no_plan"]
 TRAINED_MAIN_METHODS: List[str] = ["TR-GAT", "TR-GAT-NT", "GAT-S", "STGCN", "LSTM-P", "Tfm-P"]
 
 

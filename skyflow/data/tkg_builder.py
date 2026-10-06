@@ -63,14 +63,24 @@ LEGACY_UAV_FEATURES: List[str] = [
 LEAKAGE_FREE_UAV_FEATURES: List[str] = LEGACY_UAV_FEATURES[:20]
 LEAKING_FEATURES = ("d_min", "t_cpa", "f_avoid")
 LEAKING_RELATIONS = ("conflicts_with",)
+# S8d: filed flight-plan context (relative to the observed position, metres).
+# Legitimately available to a UTM node (plans are filed); computed from the
+# filed route and the *observed* position only - never from the true future.
+PLAN_CONTEXT_FEATURES: List[str] = [
+    "wp_dx", "wp_dy", "wp_dz",            # next filed waypoint
+    "pl10_dx", "pl10_dy", "pl10_dz",      # planned position +10 s along the filed route
+    "pl20_dx", "pl20_dy", "pl20_dz",      # +20 s
+    "pl30_dx", "pl30_dy", "pl30_dz",      # +30 s
+]
 
 
 def relation_vocab(leakage_free: bool = True) -> Dict[str, int]:
     return dict(LEAKAGE_FREE_RELATION_VOCAB if leakage_free else LEGACY_RELATION_VOCAB)
 
 
-def uav_feature_names(leakage_free: bool = True) -> List[str]:
-    return list(LEAKAGE_FREE_UAV_FEATURES if leakage_free else LEGACY_UAV_FEATURES)
+def uav_feature_names(leakage_free: bool = True, plan_context: bool = True) -> List[str]:
+    base = list(LEAKAGE_FREE_UAV_FEATURES if leakage_free else LEGACY_UAV_FEATURES)
+    return base + list(PLAN_CONTEXT_FEATURES) if plan_context else base
 
 
 @dataclass
@@ -97,6 +107,9 @@ class AirspaceState:
     # Age-of-information bookkeeping (None => everything is fresh, AoI = 0)
     uav_last_rx_time: Optional[np.ndarray] = None     # (N_uav,) timestamp of freshest report
     env_last_update_time: Optional[Dict[str, float]] = None  # per context source
+    # S8d: filed flight-plan context relative to the observed position
+    # [next waypoint (3), planned position at +10/+20/+30 s (9)]; None => zeros
+    uav_plan_context: Optional[np.ndarray] = None     # (N_uav, 12)
 
 
 DELTA_MODES = ("aoi", "legacy")
@@ -150,6 +163,7 @@ class TKGBuilder:
         delta_mode: str = "aoi",
         neighbor_search: str = "grid",
         input_set: str = "full",
+        plan_context: bool = True,
     ):
         if delta_mode not in DELTA_MODES:
             raise ValueError(f"delta_mode must be one of {DELTA_MODES}, got {delta_mode!r}")
@@ -174,7 +188,8 @@ class TKGBuilder:
         self.relations = relation_vocab(leakage_free)
         self.relation_names = sorted(self.relations, key=self.relations.get)
         self.num_relations = len(self.relations)
-        self.uav_features = uav_feature_names(leakage_free)
+        self.plan_context = bool(plan_context)
+        self.uav_features = uav_feature_names(leakage_free, self.plan_context)
         self.feature_dim = feature_dim if feature_dim is not None else len(self.uav_features)
         if self.feature_dim < len(self.uav_features):
             raise ValueError(
@@ -317,6 +332,12 @@ class TKGBuilder:
                 t_cpa = np.where(dvdv > 1e-8, -(dp * dv).sum(axis=1) / np.maximum(dvdv, 1e-8), 0.0)
                 feat[:n_uav, 21] = np.maximum(t_cpa, 0.0)                 # t_cpa
                 feat[:n_uav, 22] = state.uav_avoiding[:n_uav].astype(np.float32)  # f_avoid
+
+            # S8d: filed-plan context (zero when unavailable or in telemetry_only mode)
+            if self.plan_context and not self.telemetry_only and state.uav_plan_context is not None:
+                c0 = 20 if self.leakage_free else 23
+                pc = state.uav_plan_context[:n_uav]
+                feat[:n_uav, c0:c0 + pc.shape[1]] = pc
 
         offset = n_uav
         for i in range(n_sec):

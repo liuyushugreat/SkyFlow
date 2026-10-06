@@ -24,7 +24,8 @@ from skyflow.experiments.methods import ABLATION_METHODS, METHODS
 from skyflow.experiments.stats import bonferroni, paired_ttest
 
 LABELS = {"TR-GAT": "full", "TR-GAT-NT": "no temporal encoding", "abl_no_gating": "no relation gating",
-          "abl_no_gru": "no GRU recurrence", "abl_bce": "BCE instead of focal", "abl_telemetry_only": "telemetry only"}
+          "abl_no_gru": "no GRU recurrence", "abl_bce": "BCE instead of focal", "abl_telemetry_only": "telemetry only",
+          "abl_no_plan": "no filed-plan context"}
 FIELDS = ["method", "variant", "n_seeds", "seeds", "cdr_mean", "cdr_std", "far_mean", "far_std", "f1_mean", "f1_std",
           "d_cdr", "d_far", "d_f1", "p_f1_bonf", "p_cdr_bonf", "p_far_bonf", "auprc_mean", "threshold_mean",
           "params", "epochs_run_mean", "git_commits"]

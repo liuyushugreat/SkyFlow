@@ -34,6 +34,7 @@ COL_W = 3.5           # IEEE single column (in)
 BUDGET_MS = 200.0     # edge compute budget used in the paper (design target, excludes link delay)
 STYLE = {             # method -> (marker, linestyle); colours left to the default cycle
     "TR-GAT": ("o", "-"), "TR-GAT-NT": ("s", "--"), "GAT-S": ("^", "-."), "CPA-Rule": ("x", ":"),
+    "Plan-CPA": ("+", ":"),
     "STGCN": ("v", "--"), "LSTM-P": ("D", "-."), "Tfm-P": ("P", ":"), "VO": ("*", ":"),
 }
 
@@ -141,7 +142,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--results_dir", default="results")
     ap.add_argument("--out_dir", default="paper/figs")
-    ap.add_argument("--methods", nargs="+", default=["TR-GAT", "TR-GAT-NT", "GAT-S", "CPA-Rule"])
+    ap.add_argument("--methods", nargs="+", default=["TR-GAT", "TR-GAT-NT", "GAT-S", "CPA-Rule", "Plan-CPA"])
     ap.add_argument("--attention_layer", type=int, default=None)
     args = ap.parse_args()
     R, O = Path(args.results_dir), Path(args.out_dir)

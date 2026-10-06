@@ -38,6 +38,9 @@ features:
   leakage_free: true        # false reproduces the MobiHoc-submission feature set
   input_set: full           # full | telemetry_only
   normalize_inputs: true    # S8: standardise node features with train mean/std (false = raw inputs, legacy)
+  plan_context: true        # S8d: filed flight-plan context in UAV features (next waypoint + planned position
+                            #   +10/+20/+30 s along the filed route, relative to the observed position; zero for
+                            #   non-cooperative UAVs). false = 20-d observation-only features (S8c reference run)
   pair_edge_features: geometry  # S8c: e_ij for ALL learned scorers. geometry = [dp,dv,delta] + observed-state CPA
                                 #   geometry (t_cpa, d_cpa_h, |dz_cpa|, range, closing speed; same inputs as CPA-Rule,
                                 #   no label info). kinematics = legacy TR-GAT (7-d); none = legacy baselines ([h_i,h_j]).

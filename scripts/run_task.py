@@ -82,7 +82,7 @@ def run_task(method: str, seed: int, cfg_path: str, results_dir: str, device_str
 
     t0 = time.perf_counter()
     train = val = None
-    if spec.kind != "rule" or spec.baseline_name == "CPA-Rule":
+    if spec.kind != "rule" or spec.baseline_name in ("CPA-Rule", "Plan-CPA"):
         val = get_split(cfg, "val", device=torch.device("cpu"), cache_dir=cache_dir)
     if spec.kind in ("trgat", "learned"):
         train = get_split(cfg, "train", device=torch.device("cpu"), cache_dir=cache_dir)
@@ -158,6 +158,7 @@ def run_task(method: str, seed: int, cfg_path: str, results_dir: str, device_str
             "train_scenarios": cfg.data.train_scenarios, "val_scenarios": cfg.data.val_scenarios,
             "test_scenarios": cfg.data.test_scenarios, "scenario_duration_s": cfg.data.scenario_duration_s,
             "test_snapshots": len(test),
+            "uav_feature_dim": cfg.uav_feature_dim(), "plan_context": cfg.plan_context(),
         },
     }
     with open(out / "metrics.json", "w", encoding="utf-8") as f:

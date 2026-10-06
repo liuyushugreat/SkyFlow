@@ -68,6 +68,10 @@ class FeaturesConfig:
     #   "kinematics" [dp, dv, delta] only          (legacy TR-GAT)
     #   "none"       no pair feature, [h_i, h_j] only (legacy baselines)
     pair_edge_features: str = "geometry"
+    # S8d: filed flight-plan context in the UAV features (next waypoint, planned
+    # position +10/+20/+30 s along the filed route, relative to the observed
+    # position). False = 20-d observation-only features (S8c reference run).
+    plan_context: bool = True
 
 
 @dataclass
@@ -188,7 +192,11 @@ class SkyFlowConfig:
     def uav_feature_dim(self) -> int:
         from skyflow.data.tkg_builder import uav_feature_names
         explicit = self.data.uav_feature_dim
-        return int(explicit) if explicit is not None else len(uav_feature_names(self.leakage_free()))
+        return int(explicit) if explicit is not None else len(uav_feature_names(self.leakage_free(), self.plan_context()))
+
+    def plan_context(self) -> bool:
+        feats = getattr(self, "features", None)
+        return bool(getattr(feats, "plan_context", False)) if feats is not None else False
 
     def num_relations(self) -> int:
         from skyflow.data.tkg_builder import relation_vocab
@@ -216,6 +224,7 @@ class SkyFlowConfig:
             delta_mode=self.delta_mode(),
             neighbor_search=graph.neighbor_search,
             input_set=getattr(self.features, "input_set", "full"),
+            plan_context=self.plan_context(),
         )
 
     def dataset_kwargs(self) -> dict:

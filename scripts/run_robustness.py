@@ -30,7 +30,7 @@ from skyflow.data.cache import cache_key, get_split
 from skyflow.experiments.env_info import env_info
 from skyflow.experiments.loader import list_tasks, load_task
 
-DEFAULT_METHODS = ["TR-GAT", "TR-GAT-NT", "GAT-S", "CPA-Rule"]
+DEFAULT_METHODS = ["TR-GAT", "TR-GAT-NT", "GAT-S", "CPA-Rule", "Plan-CPA"]
 FIELDS = ["sweep", "value", "adsb_latency_lo_s", "adsb_latency_hi_s", "packet_loss", "method", "kind", "seed",
           "cdr", "far", "f1", "precision", "num_pairs", "num_positives", "num_missed_positives",
           "test_snapshots", "cache_key"]

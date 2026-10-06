@@ -75,7 +75,10 @@ class TestTelemetryOnly:
         assert set(tel.node_types.tolist()) == {ENTITY_TYPES["uav"]}
         assert set(tel.edge_indices) <= {0}                       # only 'approaches'
         assert full.num_nodes > full.num_uavs
-        assert torch.equal(tel.node_features, full.node_features[:40])
+        # telemetry-only drops the plan context (columns 20:) but keeps the observed telemetry
+        assert torch.equal(tel.node_features[:, :20], full.node_features[:40, :20])
+        assert torch.all(tel.node_features[:, 20:] == 0)
+        assert torch.any(full.node_features[:40, 20:] != 0)
         if 0 in full.edge_indices:
             assert torch.equal(tel.edge_indices[0], full.edge_indices[0])
         assert tel.relation_names == full.relation_names      # vocab unchanged (same model shapes)

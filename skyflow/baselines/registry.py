@@ -8,7 +8,7 @@ from typing import Callable, Dict, List
 
 import torch
 
-from skyflow.baselines.cpa_rule import CPARule
+from skyflow.baselines.cpa_rule import CPARule, PlanCPARule
 from skyflow.baselines.gat_static import GATStatic
 from skyflow.baselines.lstm_pair import LSTMPair
 from skyflow.baselines.stgcn import STGCN
@@ -24,15 +24,19 @@ class BaselineSpec:
     description: str = ""
 
 
-def _cpa_rule(cfg, device):
+def _cpa_rule(cfg, device, cls=CPARule):
     bl = getattr(cfg, "baselines", None)
     mode = bl.cpa_rule_thresholds if bl is not None else "label"
-    return CPARule(
+    return cls(
         window_s=cfg.data.lookahead_seconds,
         h_thresh=cfg.data.conflict_h_sep_m,
         v_thresh=cfg.data.conflict_v_sep_m,
         threshold_mode=mode,
     )
+
+
+def _plan_cpa_rule(cfg, device):
+    return _cpa_rule(cfg, device, cls=PlanCPARule)
 
 
 def _pair_kwargs(cfg) -> dict:
@@ -47,6 +51,10 @@ REGISTRY: Dict[str, BaselineSpec] = {
     "CPA-Rule": BaselineSpec(
         "CPA-Rule", _cpa_rule, True,
         "Linear extrapolation of observed state over the label window; UTM-standard rule."),
+    "Plan-CPA": BaselineSpec(
+        "Plan-CPA", _plan_cpa_rule, True,
+        "CPA interval test along the filed-plan polyline (+10/+20/+30 s planned positions); "
+        "same thresholds search as CPA-Rule."),
     "VO": BaselineSpec(
         "VO", lambda cfg, device: VelocityObstacle(), True,
         "Reciprocal velocity obstacle score with 60 s look-ahead."),
@@ -64,7 +72,7 @@ REGISTRY: Dict[str, BaselineSpec] = {
         "Static (non-temporal) GAT."),
 }
 
-BASELINE_ORDER: List[str] = ["CPA-Rule", "VO", "LSTM-P", "Tfm-P", "STGCN", "GAT-S"]
+BASELINE_ORDER: List[str] = ["CPA-Rule", "Plan-CPA", "VO", "LSTM-P", "Tfm-P", "STGCN", "GAT-S"]
 
 
 def get_baseline(name: str, cfg, device: torch.device):

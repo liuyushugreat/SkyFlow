@@ -102,13 +102,29 @@ class CPARule:
         self.search_log: List[Dict] = []
 
     # ------------------------------------------------------------------ #
-    def predict(self, snapshot: TKGSnapshot) -> torch.Tensor:
-        """(P,) scores in {0, 1} for ``snapshot.conflict_pairs``."""
+    def _segments(self, snapshot: TKGSnapshot) -> Optional[List[Tuple[np.ndarray, np.ndarray, float]]]:
+        """Piecewise-linear relative motion of every candidate pair as a list of
+        (dp, dv, duration) segments. The plain rule has one segment: observed
+        relative state extrapolated over the whole window."""
         kin = _pair_kinematics(snapshot)
         if kin is None:
+            return None
+        return [(kin[0], kin[1], self.window_s)]
+
+    @staticmethod
+    def _hit(segments: List[Tuple[np.ndarray, np.ndarray, float]], h: float, v: float) -> np.ndarray:
+        hit = None
+        for dp, dv, dur in segments:
+            s = conflict_within_window(dp, dv, dur, h, v)
+            hit = s if hit is None else (hit | s)
+        return hit
+
+    def predict(self, snapshot: TKGSnapshot) -> torch.Tensor:
+        """(P,) scores in {0, 1} for ``snapshot.conflict_pairs``."""
+        segs = self._segments(snapshot)
+        if segs is None:
             return torch.zeros(0)
-        dp, dv = kin
-        hit = conflict_within_window(dp, dv, self.window_s, self.h_thresh, self.v_thresh)
+        hit = self._hit(segs, self.h_thresh, self.v_thresh)
         return torch.tensor(hit.astype(np.float32))
 
     def fit(self, val_data: Iterable[Tuple[TKGSnapshot, torch.Tensor]]) -> Tuple[float, float]:
@@ -119,24 +135,32 @@ class CPARule:
         if self.threshold_mode != "val_search":
             return self.h_thresh, self.v_thresh
 
-        kins, labels, n_missed = [], [], 0
+        per_seg: List[List[Tuple[np.ndarray, np.ndarray]]] = []
+        durations: List[float] = []
+        labels, n_missed = [], 0
         for snap, lab in val_data:
-            kin = _pair_kinematics(snap)
+            segs = self._segments(snap)
             n_missed += int(getattr(snap, "num_missed_positives", 0))
-            if kin is None:
+            if segs is None:
                 continue
-            kins.append(kin)
+            if not per_seg:
+                per_seg = [[] for _ in segs]
+                durations = [d for _, _, d in segs]
+            for k, (dp, dv, _) in enumerate(segs):
+                per_seg[k].append((dp, dv))
             labels.append(lab.detach().cpu().numpy() >= 0.5)
-        if not kins:
+        if not per_seg:
             return self.h_thresh, self.v_thresh
-        dp = np.concatenate([k[0] for k in kins])
-        dv = np.concatenate([k[1] for k in kins])
+        segments = [
+            (np.concatenate([s[0] for s in seg]), np.concatenate([s[1] for s in seg]), durations[k])
+            for k, seg in enumerate(per_seg)
+        ]
         y = np.concatenate(labels)
 
         best = (-1.0, self.h_thresh, self.v_thresh)
         self.search_log = []
         for h, v in itertools.product(self.h_grid, self.v_grid):
-            pred = conflict_within_window(dp, dv, self.window_s, h, v)
+            pred = self._hit(segments, h, v)
             tp = int(np.sum(pred & y))
             fp = int(np.sum(pred & ~y))
             fn = int(np.sum(~pred & y)) + n_missed
@@ -159,3 +183,51 @@ class CPARule:
             "v_thresh": self.v_thresh,
             "threshold_mode": self.threshold_mode,
         }
+
+
+PLAN_FEATURE_PREFIXES = ("pl10", "pl20", "pl30")
+
+
+class PlanCPARule(CPARule):
+    """Plan-aware CPA rule (S8d): the same interval test applied to the
+    *filed-plan* trajectory instead of linear extrapolation.
+
+    Each UAV's planned path is the polyline through its observed position and
+    the planned positions at +10/+20/+30 s read from the node features
+    (``pl10_*``, ``pl20_*``, ``pl30_*`` - the same plan context the learned
+    models receive).  UAVs without plan context (non-cooperative; all-zero
+    offsets) fall back to linear extrapolation of the observed velocity.
+    Separation is tested exactly on every 10 s segment.
+    """
+
+    def _segments(self, snapshot: TKGSnapshot):
+        pairs = snapshot.conflict_pairs
+        if pairs is None or pairs.size(1) == 0:
+            return None
+        names = list(getattr(snapshot, "feature_names", None) or [])
+        if not all(f"{p}_dx" in names for p in PLAN_FEATURE_PREFIXES):
+            raise ValueError("PlanCPARule needs plan-context features (features.plan_context: true)")
+        feats = snapshot.node_features.detach().cpu().numpy()
+        n = snapshot.num_uavs
+        P = feats[:n, 0:3].astype(np.float64)
+        V = feats[:n, 3:6].astype(np.float64)
+        src = pairs[0].detach().cpu().numpy()
+        dst = pairs[1].detach().cpu().numpy()
+
+        n_seg = len(PLAN_FEATURE_PREFIXES)
+        dur = self.window_s / n_seg
+        knots = [P]
+        for k, pfx in enumerate(PLAN_FEATURE_PREFIXES):
+            c = names.index(f"{pfx}_dx")
+            off = feats[:n, c:c + 3].astype(np.float64)
+            no_plan = np.linalg.norm(off, axis=1) < 1e-6
+            off = np.where(no_plan[:, None], V * (dur * (k + 1)), off)   # fallback: linear extrapolation
+            knots.append(P + off)
+        segs = []
+        for k in range(n_seg):
+            q0, q1 = knots[k], knots[k + 1]
+            seg_v = (q1 - q0) / dur
+            dp = q0[dst] - q0[src]
+            dv = seg_v[dst] - seg_v[src]
+            segs.append((dp, dv, dur))
+        return segs

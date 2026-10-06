@@ -173,6 +173,12 @@ class TruthLog:
     scenario_id: Optional[Tuple[str, int]] = None   # (split, index)
     causes: Optional[np.ndarray] = None             # (N,) int codes into CAUSES
     cooperative: Optional[np.ndarray] = None        # (N,) bool
+    # Filed flight plans (S8d plan context). Waypoints as *filed* (no flown
+    # deviations), padded by repeating the last waypoint to a common length.
+    plan_waypoints: Optional[np.ndarray] = None     # (N, W_max, 3)
+    plan_num_waypoints: Optional[np.ndarray] = None # (N,) int
+    plan_cruise_speed: Optional[np.ndarray] = None  # (N,) m/s
+    plan_start_time: Optional[np.ndarray] = None    # (N,) filed departure time (s)
 
     def cause_of_pair(self, i: int, j: int) -> str:
         if self.causes is None:
@@ -183,6 +189,109 @@ class TruthLog:
     @property
     def num_uavs(self) -> int:
         return self.positions.shape[1]
+
+
+PLAN_HORIZONS_S: Tuple[float, ...] = (10.0, 20.0, 30.0)
+
+
+def pack_filed_plans(plans: List["UAVFlightPlan"], n_uav: int):
+    """Pad the filed waypoint lists of ``plans`` into (N, W_max, 3) by
+    repeating each plan's last waypoint; also return counts, cruise speeds
+    and filed departure times."""
+    w_max = max(2, max((len(p.waypoints) for p in plans), default=2))
+    wps = np.zeros((n_uav, w_max, 3), np.float32)
+    counts = np.ones(n_uav, np.int32)
+    speeds = np.zeros(n_uav, np.float32)
+    starts = np.zeros(n_uav, np.float32)
+    for p in plans:
+        w = np.asarray(p.waypoints, np.float32)
+        k = len(w)
+        wps[p.uav_id, :k] = w
+        wps[p.uav_id, k:] = w[-1]
+        counts[p.uav_id] = k
+        speeds[p.uav_id] = p.cruise_speed
+        starts[p.uav_id] = p.start_time
+    return wps, counts, speeds, starts
+
+
+def filed_plan_context(
+    log: "TruthLog",
+    positions: np.ndarray,
+    epoch_time: float = 0.0,
+    velocities: Optional[np.ndarray] = None,
+    horizons_s: Sequence[float] = PLAN_HORIZONS_S,
+) -> Optional[np.ndarray]:
+    """Decision-time flight-plan context for every UAV (S8d).
+
+    Inputs are only what a UTM node legitimately holds: the *filed* route and
+    cruise speed, plus the *observed* position (and heading, used to
+    disambiguate the active route segment when a route revisits a hub).  The
+    planned path is the polyline [observed position -> next filed waypoint ->
+    following waypoints] (the way a waypoint-following controller steers),
+    flown at the filed cruise speed.  Returns (N, 3 + 3·len(horizons)) =
+    [next waypoint - p (3), planned(+τ_k) - p (3 each)] in metres.
+    Non-cooperative UAVs (no filed plan at the UTM node) get all-zero
+    context.  No truth state and no labels are used.  (The simulator flies
+    every UAV from t = 0; ``plan.start_time`` only gates steering, so no
+    departure delay is modelled here.)
+    """
+    if log.plan_waypoints is None:
+        return None
+    W = log.plan_waypoints.astype(np.float64)                      # (N, M, 3)
+    N, M, _ = W.shape
+    p = positions.astype(np.float64)                               # (N, 3)
+    a, b = W[:, :-1, :], W[:, 1:, :]                               # segments (N, M-1, 3)
+    ab = b - a
+    seg_len = np.linalg.norm(ab, axis=-1)                          # (N, M-1)
+    valid = seg_len > 1e-6
+    ap = p[:, None, :] - a
+    t = np.einsum("nmk,nmk->nm", ap, ab) / np.maximum(seg_len ** 2, 1e-9)
+    t = np.where(valid, np.clip(t, 0.0, 1.0), 0.0)
+    foot = a + t[..., None] * ab                                   # (N, M-1, 3)
+    dist = np.linalg.norm(p[:, None, :] - foot, axis=-1)           # distance to each route segment
+    dist = np.where(valid, dist, np.inf)
+    if velocities is not None:
+        # The active segment is the nearest one whose end waypoint lies ahead of
+        # the observed heading (a waypoint-following controller flies straight at
+        # its target; this also covers overshoot loops back to a missed waypoint
+        # and routes that revisit a hub).  Segments whose target is behind the
+        # UAV are excluded; a small bias prefers the better-aligned target.
+        v = velocities.astype(np.float64)
+        vh = np.linalg.norm(v[:, :2], axis=1)
+        moving = vh > 0.5
+        to_wp = b - p[:, None, :]                                  # (N, M-1, 3) bearing to each segment's target
+        d_wp = np.linalg.norm(to_wp[..., :2], axis=-1)
+        cos = np.einsum("nk,nmk->nm", v[:, :2], to_wp[..., :2]) / (
+            np.maximum(vh, 1e-9)[:, None] * np.maximum(d_wp, 1e-9))
+        behind = moving[:, None] & (cos < 0.0) & (d_wp > 5.0)
+        dist = np.where(behind, dist + 1e4, dist - 5.0 * np.where(moving[:, None], cos, 0.0))
+    no_valid = ~np.isfinite(dist).any(axis=1)
+    dist[no_valid, 0] = 0.0
+    k0 = np.argmin(dist, axis=1)                                   # active segment (N,)
+    rows = np.arange(N)
+    nxt = b[rows, k0]                                              # next filed waypoint (N, 3)
+
+    # planned polyline: p -> nxt -> following filed waypoints
+    first_len = np.linalg.norm(nxt - p, axis=1)
+    rest_len = np.where(np.arange(M - 1)[None, :] > k0[:, None], seg_len, 0.0)     # (N, M-1)
+    cum = np.concatenate([np.zeros((N, 1)), first_len[:, None], first_len[:, None] + np.cumsum(rest_len, axis=1)], axis=1)
+    total = cum[:, -1]
+    speed = log.plan_cruise_speed.astype(np.float64) if log.plan_cruise_speed is not None else np.zeros(N)
+
+    out = np.zeros((N, 3 + 3 * len(horizons_s)), np.float64)
+    out[:, 0:3] = nxt - p
+    knots = np.concatenate([p[:, None, :], nxt[:, None, :], b], axis=1)          # (N, M+1, 3); knot j -> cum[:, j]
+    for h, tau in enumerate(horizons_s):
+        s = np.minimum(speed * float(tau), total)
+        j = np.clip((s[:, None] >= cum[:, 1:]).sum(axis=1), 0, M - 1)             # knot index of segment start
+        seg = knots[rows, j + 1] - knots[rows, j]
+        L = cum[rows, j + 1] - cum[rows, j]
+        frac = np.where(L > 1e-6, np.clip((s - cum[rows, j]) / np.maximum(L, 1e-9), 0.0, 1.0), 0.0)
+        q = knots[rows, j] + frac[:, None] * seg
+        out[:, 3 + 3 * h: 6 + 3 * h] = q - p
+    if log.cooperative is not None:
+        out[~log.cooperative] = 0.0
+    return out.astype(np.float32)
 
 
 class UrbanAir500:
@@ -492,6 +601,8 @@ class UrbanAir500:
             causes=causes,
             cooperative=cooperative,
         )
+        (log.plan_waypoints, log.plan_num_waypoints,
+         log.plan_cruise_speed, log.plan_start_time) = pack_filed_plans(plans, N)
 
         for epoch in range(n_total):
             t = epoch * self.dt
@@ -631,6 +742,7 @@ class UrbanAir500:
             uav_corridor_ids=corridor_ids,
             uav_local_wind=local_wind,
             uav_gps_dop=log.gps_dop[epoch].copy(),
+            uav_plan_context=filed_plan_context(log, positions, t, log.velocities[epoch]),
         )
 
     # -- adsb: latency + loss + GPS noise -------------------------------- #
@@ -716,6 +828,7 @@ class UrbanAir500:
             uav_gps_dop=log.gps_dop[g_used, rows].copy(),
             uav_last_rx_time=last_rx_time,
             env_last_update_time=env_last_update,
+            uav_plan_context=filed_plan_context(log, positions, t, velocities),   # filed plan + observed state only
         )
 
     # ------------------------------------------------------------------ #

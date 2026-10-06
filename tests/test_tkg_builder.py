@@ -36,10 +36,11 @@ class TestTKGBuilder:
         snapshot = builder.build(state)
         assert snapshot.num_uavs == 10
         assert snapshot.num_nodes == 10 + 4 + 4 + 2
-        assert snapshot.node_features.shape == (20, 20)
+        assert snapshot.node_features.shape == (20, 32)          # 20 observed + 12 plan context
+        assert TKGBuilder(plan_context=False).build(state).node_features.shape == (20, 20)
 
     def test_build_shape_legacy(self):
-        builder = TKGBuilder(leakage_free=False)
+        builder = TKGBuilder(leakage_free=False, plan_context=False)
         snapshot = builder.build(_make_state(n_uav=10))
         assert snapshot.node_features.shape == (20, 23)
         assert builder.num_relations == 6
