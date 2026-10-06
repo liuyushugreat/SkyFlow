@@ -62,28 +62,34 @@ def tab_main(res: Results, out: Path, methods):
     n_seeds = sorted({int(r["n_seeds"]) for _, r in rows})
     ref = (res.tests or {}).get("reference", "TR-GAT")
 
-    head = ["Method", "CDR$\\uparrow$", "FAR$\\downarrow$", "F1$\\uparrow$"]
-    spec = "l" + "c" * 3
+    use_params = "params" in res.summary.columns and res.summary["params"].notna().any()
+    # column order: threshold-free AUPRC first, then the operating point, hard regime, cost
+    head, spec = ["Method"], "l"
     if use_auprc:
         head.append("AUPRC$\\uparrow$"); spec += "c"
+    head += ["CDR$\\uparrow$", "FAR$\\downarrow$", "F1$\\uparrow$", "Hard CDR$\\uparrow$"]; spec += "cccc"
+    if use_params:
+        head.append("Par.\\,(M)"); spec += "c"
     if use_lat:
-        head.append("P95 lat.\\,(ms)$\\downarrow$"); spec += "c"
-    head.append("Hard CDR$\\uparrow$"); spec += "c"
+        head.append("P95\\,(ms)$\\downarrow$"); spec += "c"
     lines = ["\\begin{tabular}{" + spec + "}", "\\toprule", " & ".join(head) + " \\\\", "\\midrule"]
     for i, (m, r) in enumerate(rows):
-        cells = [tex_escape(m) if m != ref else f"\\textbf{{{tex_escape(m)}}}",
-                 _b(fmt_pm(r["cdr_mean"], r["cdr_std"]), bold["cdr"][i]),
-                 _b(fmt_pm(r["far_mean"], r["far_std"]), bold["far"][i]),
-                 _b(fmt_pm(r["f1_mean"], r["f1_std"]), bold["f1"][i])]
+        f1 = _b(fmt_pm(r["f1_mean"], r["f1_std"]), bold["f1"][i])
         if m != ref:   # significance marker on F1 (paired t-test vs reference, Bonferroni)
             p = res.p_value("f1", m)
             if p is not None and math.isfinite(p):
-                cells[3] += "$^{*}$" if p < 0.05 else "$^{\\dagger}$"
+                f1 += "$^{*}$" if p < 0.05 else "$^{\\dagger}$"
+        cells = [tex_escape(m) if m != ref else f"\\textbf{{{tex_escape(m)}}}"]
         if use_auprc:
             cells.append(_b(fmt_pm(r.get("auprc_mean"), r.get("auprc_std")), bold["auprc"][i]))
+        cells += [_b(fmt_pm(r["cdr_mean"], r["cdr_std"]), bold["cdr"][i]),
+                  _b(fmt_pm(r["far_mean"], r["far_std"]), bold["far"][i]), f1,
+                  _b(fmt_pm(*hard[m]), bold["hard"][i])]
+        if use_params:
+            pm = r.get("params")
+            cells.append(f"{float(pm) / 1e6:.2f}" if pm is not None and math.isfinite(float(pm)) and float(pm) > 0 else "--")
         if use_lat:
             cells.append(_b(fmt(r.get("latency_p95_ms"), 1), bold["lat"][i]))
-        cells.append(_b(fmt_pm(*hard[m]), bold["hard"][i]))
         lines.append(" & ".join(cells) + " \\\\")
     lines += ["\\bottomrule", "\\end{tabular}"]
 
