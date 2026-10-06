@@ -21,6 +21,8 @@ Stage robust    "python scripts/run_robustness.py --results_dir results/main --o
 Stage scaling   "python scripts/run_scaling.py --checkpoint results/main/TR-GAT/seed42 --out_csv results/scaling.csv --out_fit results/scaling_fit.json"
 # 5. attention vs AoI (last layer, in-degree normalised)
 Stage attention "python scripts/analyze_attention_aoi.py --checkpoint results/main/TR-GAT/seed42 --out_csv results/attention_vs_aoi.csv"
+# 5b. S8e intent-conformance gate value per conflict cause
+Stage gate      "python scripts/analyze_gate.py --checkpoint results/main/TR-GAT/seed42 --out_csv results/gate_by_cause.csv"
 # 6. S16 artefacts
 Stage figures   "python scripts/make_figures.py --results_dir results --out_dir paper/figs"
 Stage tables    "python scripts/make_tables.py --results_dir results --out_dir paper/tables"

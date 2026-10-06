@@ -76,6 +76,7 @@ class Results:
         self.scaling = self._csv(R / "scaling.csv")
         self.scaling_fit = self._json(R / "scaling_fit.json")
         self.attention = self._csv(R / "attention_vs_aoi.csv")
+        self.gate = self._csv(R / "gate_by_cause.csv")              # S8e intent-conformance gate
         self.main_dir = R / "main" if (R / "main").is_dir() else R   # per-task metrics.json live here
 
     @staticmethod

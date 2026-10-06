@@ -185,6 +185,14 @@ class TestConformanceGate:
         with tempfile.TemporaryDirectory() as d:
             info = tr.train(data, data, seed=1, output_dir=d, max_epochs=1)
         assert info["epochs_run"] == 1 and tr.head.last_gate is not None
+        # gate analysis groups (scripts/analyze_gate.py) on the same data
+        import importlib.util, pathlib
+        spec = importlib.util.spec_from_file_location(
+            "analyze_gate", pathlib.Path(__file__).resolve().parents[1] / "scripts" / "analyze_gate.py")
+        mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+        groups = mod.collect(tr, data)
+        assert {"uav:all", "pair:negative"} <= set(groups)
+        assert all(((w >= 0) & (w <= 1)).all() for w in groups.values())
 
 
 class TestLinkMix:
