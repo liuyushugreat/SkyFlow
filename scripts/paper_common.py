@@ -20,6 +20,12 @@ ABL_LABEL = {
     "abl_no_conf_gate": "w/o intent-conformance gate", "abl_no_sync": "w/o AoI synchronisation",
     "abl_tbptt": "truncated BPTT (1 step)",
 }
+ABL_SHORT = {   # compact two-up ablation table (page budget)
+    "TR-GAT": "TR-GAT (full)", "TR-GAT-NT": "w/o $\\phi(\\delta)$", "abl_no_gating": "w/o rel. gating",
+    "abl_no_gru": "w/o GRU state", "abl_bce": "BCE loss", "abl_telemetry_only": "telemetry only",
+    "abl_no_plan": "w/o plan context", "abl_no_conf_gate": "w/o conf. gate",
+    "abl_no_sync": "w/o AoI sync.", "abl_tbptt": "TBPTT (1 step)",
+}
 _CAMEL = {"TR-GAT": "TrGat", "TR-GAT-NT": "TrGatNt", "GAT-S": "GatS", "STGCN": "Stgcn", "LSTM-P": "LstmP",
           "Tfm-P": "TfmP", "CPA-Rule": "CpaRule", "Plan-CPA": "PlanCpa", "VO": "Vo", "abl_no_gating": "AblNoGating",
           "abl_no_gru": "AblNoGru", "abl_bce": "AblBce", "abl_telemetry_only": "AblTelemetry",

@@ -36,6 +36,16 @@ def _num_ok(x):
         return False
 
 
+def _sci(x):
+    """1e-05 -> '$10^{-5}$', 0.0003 -> '0.0003', 3e-4 stays decimal (only pure powers of ten become exponents)."""
+    x = float(x)
+    if x > 0:
+        e = math.log10(x)
+        if abs(e - round(e)) < 1e-9 and round(e) <= -3:
+            return f"$10^{{{int(round(e))}}}$"
+    return f"{x:g}"
+
+
 class Macros:
     def __init__(self):
         self.lines, self.names = [], set()
@@ -150,7 +160,9 @@ def main():
                           ("cfgLr", f"{t['learning_rate']:g}"), ("cfgEpochsMax", t["epochs"]), ("cfgPatience", t["early_stopping_patience"]),
                           ("cfgFocalGamma", f"{t['focal_gamma']:g}"), ("cfgFocalAlpha", f"{t['focal_alpha']:g}"),
                           ("cfgRegimeTtcS", f"{t['regime_ttc_boundary_s']:g}"), ("cfgNumSectors", d["num_sectors"]),
-                          ("cfgNumZones", d["num_restricted_zones"])):
+                          ("cfgNumZones", d["num_restricted_zones"]),
+                          ("cfgWeightDecay", _sci(t["weight_decay"])), ("cfgWarmupSteps", t["warmup_steps"]),
+                          ("cfgDropout", f"{m['dropout']:g}")):
             M.add(name, val)
         mix = s.get("cause_mix") or {}
         for k, v in mix.items():
@@ -234,7 +246,8 @@ def main():
         if not d.empty:
             under = d[d["total_p95_ms"] <= 200.0]
             M.add("nMaxUnderBudget", int(under["num_uavs"].max()) if not under.empty else 0)
-            M.add("peakGpuMemGb", f"{float(d['peak_gpu_mem_gb'].max()):.1f}")
+            if "peak_gpu_mem_gb" in d.columns:
+                M.add("peakGpuMemGb", f"{float(d['peak_gpu_mem_gb'].max()):.1f}")
 
     # ---- attention vs AoI ----------------------------------------------
     if res.attention is not None:
@@ -347,7 +360,9 @@ def main():
                 if col.startswith("frac_lt_"):
                     lv = col[len("frac_lt_"):]
                     if _num_ok(r[col]):
-                        M.add(macro_name("nm", grp, "Lt" + lv_name.get(lv, lv), m), f"{float(r[col]) * 100:.0f}")
+                        pct = float(r[col]) * 100
+                        # one decimal below 10 % so that rare near-misses among random negatives do not print as 0
+                        M.add(macro_name("nm", grp, "Lt" + lv_name.get(lv, lv), m), f"{pct:.1f}" if pct < 10 else f"{pct:.0f}")
             if (_num_ok(r.get("positive_mismatch")) and _num_ok(r.get("negative_mismatch"))
                     and macro_name("nmMismatch", m) not in M.names):
                 M.add(macro_name("nmMismatch", m), f"{int(r['positive_mismatch']) + int(r['negative_mismatch'])}")

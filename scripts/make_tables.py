@@ -20,7 +20,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from paper_common import (ABL_LABEL, ABL_ORDER, MAIN_ORDER, Results, fmt, fmt_pm, tex_escape)  # noqa: E402
+from paper_common import (ABL_LABEL, ABL_ORDER, ABL_SHORT, MAIN_ORDER, Results, fmt, fmt_pm, tex_escape)  # noqa: E402
 from skyflow.config import SkyFlowConfig  # noqa: E402
 
 
@@ -73,6 +73,15 @@ def tab_main(res: Results, out: Path, methods):
     if use_lat:
         head.append("P95\\,(ms)$\\downarrow$"); spec += "c"
     lines = ["\\begin{tabular}{" + spec + "}", "\\toprule", " & ".join(head) + " \\\\", "\\midrule"]
+    # single-column width: mean+-std only on the tested metric (F1); other columns show the mean and the
+    # note reports the largest std among them (no information is dropped silently)
+    def _finite(x):
+        try:
+            return x is not None and math.isfinite(float(x))
+        except (TypeError, ValueError):
+            return False
+    other_std = [float(x) for m, r in rows for x in (r.get("auprc_std"), r["cdr_std"], r["far_std"], hard[m][1]) if _finite(x)]
+    max_other_std = max(other_std) if other_std else float("nan")
     for i, (m, r) in enumerate(rows):
         f1 = _b(fmt_pm(r["f1_mean"], r["f1_std"]), bold["f1"][i])
         if m != ref:   # significance marker on F1 (paired t-test vs reference, Bonferroni)
@@ -81,10 +90,10 @@ def tab_main(res: Results, out: Path, methods):
                 f1 += "$^{*}$" if p < 0.05 else "$^{\\dagger}$"
         cells = [tex_escape(m) if m != ref else f"\\textbf{{{tex_escape(m)}}}"]
         if use_auprc:
-            cells.append(_b(fmt_pm(r.get("auprc_mean"), r.get("auprc_std")), bold["auprc"][i]))
-        cells += [_b(fmt_pm(r["cdr_mean"], r["cdr_std"]), bold["cdr"][i]),
-                  _b(fmt_pm(r["far_mean"], r["far_std"]), bold["far"][i]), f1,
-                  _b(fmt_pm(*hard[m]), bold["hard"][i])]
+            cells.append(_b(fmt(r.get("auprc_mean")), bold["auprc"][i]))
+        cells += [_b(fmt(r["cdr_mean"]), bold["cdr"][i]),
+                  _b(fmt(r["far_mean"]), bold["far"][i]), f1,
+                  _b(fmt(hard[m][0]), bold["hard"][i])]
         if use_params:
             pm = r.get("params")
             cells.append(f"{float(pm) / 1e6:.2f}" if pm is not None and math.isfinite(float(pm)) and float(pm) > 0 else "--")
@@ -102,31 +111,48 @@ def tab_main(res: Results, out: Path, methods):
             f"% * : p<0.05 vs {ref} (paired t-test over seeds, Bonferroni); dagger : not significant\n")
     _write(out, note + "\n".join(lines) + "\n")
     # companion caption fragment as a macro (\input it in the preamble, use \tabMainNote in \caption)
+    std_note = f"Other columns: mean, std $\\le{max_other_std:.3f}$. " if math.isfinite(max_other_std) else ""
     _write(out.with_name(out.stem + "_note.tex"),
            "\\newcommand{\\tabMainNote}{"
-           f"Latency P95 measured on one {tex_escape(gpu)}. "
-           f"$^{{*}}$: $p<0.05$ vs.\\ {tex_escape(ref)} (paired $t$-test over seeds, Bonferroni); $^{{\\dagger}}$: n.s.}}\n")
+           f"{std_note}Latency P95 measured on one {tex_escape(gpu)}. "
+           f"$^{{*}}$: $p<0.05$ vs.\\ {tex_escape(ref)} on F1 (paired $t$-test over seeds, Bonferroni); $^{{\\dagger}}$: n.s.}}\n")
 
 
 # --------------------------------------------------------------------------- ablation table
-def tab_ablation(res: Results, out: Path):
+def tab_ablation(res: Results, out: Path, compact=True):
     if res.ablation is None:
         print("[skip] ablation table"); return
     d = res.ablation.set_index("method")
     order = [m for m in ABL_ORDER if m in d.index]
-    lines = ["\\begin{tabular}{lcccc}", "\\toprule",
-             "Variant & CDR$\\uparrow$ & FAR$\\downarrow$ & F1$\\uparrow$ & $\\Delta$F1 \\\\", "\\midrule"]
     f1s = [d.loc[m, "f1_mean"] for m in order]
     bold = _bold_mask(f1s, True)
-    for i, m in enumerate(order):
+
+    def _cells(i, m):
         r = d.loc[m]
         dF1 = "--" if m == "TR-GAT" else f"{r['d_f1']:+.3f}"
         p = r.get("p_f1_bonf")
         if m != "TR-GAT" and p is not None and math.isfinite(p):
             dF1 += "$^{*}$" if p < 0.05 else "$^{\\dagger}$"
-        lines.append(" & ".join([ABL_LABEL.get(m, tex_escape(m)),
-                                 fmt_pm(r["cdr_mean"], r["cdr_std"]), fmt_pm(r["far_mean"], r["far_std"]),
-                                 _b(fmt_pm(r["f1_mean"], r["f1_std"]), bold[i]), dF1]) + " \\\\")
+        label = (ABL_SHORT if compact else ABL_LABEL).get(m, tex_escape(m))
+        return [label, _b(fmt_pm(r["f1_mean"], r["f1_std"]), bold[i]), dF1]
+
+    if compact:
+        # two variants per row (page budget): Variant | F1 | dF1 || Variant | F1 | dF1 ; CDR/FAR stay in ablation.csv
+        half = (len(order) + 1) // 2
+        lines = ["\\begin{tabular}{lcc@{\\hspace{3pt}}lcc}", "\\toprule",
+                 "Variant & F1$\\uparrow$ & $\\Delta$F1 & Variant & F1$\\uparrow$ & $\\Delta$F1 \\\\", "\\midrule"]
+        for k in range(half):
+            left = _cells(k, order[k])
+            right = _cells(k + half, order[k + half]) if k + half < len(order) else ["", "", ""]
+            lines.append(" & ".join(left + right) + " \\\\")
+    else:
+        lines = ["\\begin{tabular}{lcccc}", "\\toprule",
+                 "Variant & CDR$\\uparrow$ & FAR$\\downarrow$ & F1$\\uparrow$ & $\\Delta$F1 \\\\", "\\midrule"]
+        for i, m in enumerate(order):
+            r = d.loc[m]
+            c = _cells(i, m)
+            lines.append(" & ".join([c[0], fmt_pm(r["cdr_mean"], r["cdr_std"]), fmt_pm(r["far_mean"], r["far_std"]),
+                                     c[1], c[2]]) + " \\\\")
     lines += ["\\bottomrule", "\\end{tabular}"]
     _write(out, f"% auto-generated from {res.dir}; do not edit\n" + "\n".join(lines) + "\n")
 
@@ -169,7 +195,7 @@ def tab_events(res: Results, out: Path, methods, persistence=1):
                 ev += "$^{*}$" if p < 0.05 else "$^{\\dagger}$"
         cells = [tex_escape(m) if m != ref else f"\\textbf{{{tex_escape(m)}}}",
                  _b(ev, bold["ev"][i]),
-                 _b(fmt_pm(r["timely_cdr_mean"], r["timely_cdr_std"]), bold["tm"][i]),
+                 _b(fmt(r["timely_cdr_mean"]), bold["tm"][i]),
                  _b(fmt(r["lead_median_s_mean"], 1), bold["ld"][i]),
                  _b(fmt(r["false_episodes_per_uav_hour_mean"], 1), bold["fa"][i])]
         if brows:
@@ -194,6 +220,36 @@ def tab_events(res: Results, out: Path, methods, persistence=1):
             f"% persistence M={persistence}; events={n_ev}; UAV-hours={rows[0][1].get('uav_hours')}; timely = lead >= {lead_s} s"
             f"{bval}; * : p<0.05 vs {ref} on event CDR (paired t over seeds, Bonferroni)\n")
     _write(out, note + "\n".join(lines) + "\n")
+    # companion caption fragment: largest std of the mean-only columns (timely CDR, lead, false episodes)
+    stds = []
+    for _, r in rows:
+        for k in ("timely_cdr_std", "lead_median_s_std", "false_episodes_per_uav_hour_std"):
+            v = r.get(k)
+            if v is not None and math.isfinite(float(v)):
+                stds.append((k, float(v)))
+    for b in brows.values():
+        v = b.get("lead_median_s_std")
+        if v is not None and math.isfinite(float(v)):
+            stds.append(("lead_median_s_std", float(v)))
+    parts = []
+    mx = {}
+    for k, v in stds:
+        mx[k] = max(mx.get(k, 0.0), v)
+    if "timely_cdr_std" in mx:
+        parts.append(f"timely CDR $\\le{mx['timely_cdr_std']:.3f}$")
+    if "lead_median_s_std" in mx:
+        parts.append(f"lead $\\le{mx['lead_median_s_std']:.1f}$\\,s")
+    if "false_episodes_per_uav_hour_std" in mx:
+        parts.append(f"FA/UAV-h $\\le{mx['false_episodes_per_uav_hour_std']:.1f}$")
+    std_note = ("Other columns: mean over seeds, std " + ", ".join(parts) + ". ") if parts else ""
+    budget_note = ""
+    if brows:
+        any_b = next(iter(brows.values()))
+        bv = any_b.get("budget_mean")
+        budget_note = (f"Budget: {fmt(bv, 1)} false episodes per UAV-hour on validation"
+                       + (" (CPA-Rule's own rate)" if str(bkind).startswith("match") else "") + ". ")
+    _write(out.with_name(out.stem + "_note.tex"),
+           "\\newcommand{\\tabEventsNote}{" + std_note + budget_note + "}\n")
 
 
 # --------------------------------------------------------------------------- setup table
@@ -238,11 +294,12 @@ def main():
     ap.add_argument("--out_dir", default="paper/tables")
     ap.add_argument("--config", default="configs/default.yaml")
     ap.add_argument("--methods", nargs="+", default=MAIN_ORDER)
+    ap.add_argument("--ablation_wide", action="store_true", help="one variant per row with CDR/FAR (default: two per row)")
     args = ap.parse_args()
     res = Results(args.results_dir)
     O = Path(args.out_dir)
     tab_main(res, O / "tab_main.tex", args.methods)
-    tab_ablation(res, O / "tab_ablation.tex")
+    tab_ablation(res, O / "tab_ablation.tex", compact=not args.ablation_wide)
     tab_events(res, O / "tab_events.tex", args.methods)
     tab_setup(res, Path(args.config), O / "tab_setup.tex")
 

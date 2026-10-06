@@ -1,191 +1,123 @@
-# SkyFlow: Temporal Relational Graph Attention for Real-Time UAV Conflict Detection
+# SkyFlow: AoI-Aware Temporal Relational Graph Attention for Real-Time UAV Conflict Detection at the Edge
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![PyTorch 2.2+](https://img.shields.io/badge/PyTorch-2.2+-EE4C2C.svg)](https://pytorch.org/)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
-[![Tests: 23 passed](https://img.shields.io/badge/tests-23_passed-brightgreen.svg)]()
 
-> **Official implementation** of the SkyFlow framework and **TR-GAT** (Temporally-conditioned Relational Graph Attention Network), an edge-assisted real-time conflict detection and resolution system for dense Urban Air Mobility (UAM) and Flying Ad Hoc Networks (FANETs).
+> Code, configuration and result files for the SkyFlow paper (TR-GAT: temporal relational graph attention
+> conditioned on the age of information of every edge, with AoI-synchronised pair geometry and an
+> intent-conformance gate), evaluated under a leakage-free, event-level protocol.
 
----
-
-## Artifact Overview
-
-This artifact provides the complete source code to reproduce all experimental results presented in the paper, including detection accuracy, system latency, baseline comparisons, scalability analysis, and statistical significance tests.
-
-| Component | Description |
-|-----------|-------------|
-| **UrbanAir-500 Benchmark** | High-fidelity UAM simulator: 500 concurrent UAVs, 5 km x 5 km urban grid, stochastic wind, GPS noise (CEP 2.5 m), ADS-B latency (0.5--1.2 s) |
-| **Temporal Knowledge Graph Builder** | Converts raw ADS-B telemetry, flight plans, weather grids, and corridor reservations into typed spatio-temporal knowledge graphs at 10 Hz |
-| **TR-GAT Model** | 4-layer temporally-conditioned relational graph attention with sinusoidal temporal encoding and multi-relation gating |
-| **Resolution Module** | Coordinated avoidance waypoint generation via Projected Gradient Descent (PGD) for conflict clusters up to 12 aircraft |
-| **6 Baselines** | VO, LSTM-Pair, Transformer-Pair, STGCN, GAT-Static, TR-GAT-NoTemp -- all parameter-matched |
-
-### Key Results (UrbanAir-500, 500 simultaneous UAVs)
-
-| Method | CDR | FAR | F1 | Latency (ms) |
-|--------|:---:|:---:|:--:|:------------:|
-| Velocity Obstacle | 0.6012 | 0.4231 | 0.5847 | 8.4 |
-| LSTM-Pair | 0.7856 | 0.1923 | 0.7724 | 23.7 |
-| Transformer-Pair | 0.8367 | 0.1547 | 0.8241 | 41.2 |
-| STGCN | 0.8512 | 0.1389 | 0.8384 | 52.8 |
-| GAT-Static | 0.8794 | 0.1156 | 0.8673 | 124.6 |
-| TR-GAT-NoTemp | 0.8891 | 0.1023 | 0.8782 | 139.1 |
-| **TR-GAT (Ours)** | **0.9247** | **0.0734** | **0.9132** | **147.3** |
+**Every number in the paper is generated from files under `results/` by the scripts in `scripts/`;
+nothing is typed by hand.** `paper/numbers.tex`, `paper/tables/*.tex` and `paper/figs/*.pdf` are
+build artefacts of `scripts/make_macros.py`, `scripts/make_tables.py` and `scripts/make_figures.py`,
+and each generated file records the `results/` directory, git commit and hardware it came from.
 
 ---
 
-## Quick Installation
+## What is in the artifact
 
-**Prerequisites:** Python 3.10+, PyTorch 2.2+. Tested on Ubuntu 22.04 with NVIDIA A100 (CUDA 12.1).
+| Component | Where |
+|-----------|-------|
+| Urban low-altitude simulator (500 UAVs, 5 km, hub-converging routes, five conflict causes, heterogeneous ADS-B latency / loss per scenario, GPS noise, non-cooperative aircraft) | `skyflow/data/` |
+| Leakage-free labels: future 6-DoF trajectories integrated over 30 s, 10 m horizontal / 3 m vertical separation; inputs restricted to decision-time observables | `skyflow/data/`, `tests/test_no_leakage.py`, `tests/test_labels.py` |
+| Temporal knowledge graph builder (typed nodes, five relation types, edge AoI, spatial hash candidate set) | `skyflow/data/tkg_builder.py` |
+| AoI-synchronised pair geometry shared by all learned scorers and both CPA rules | `skyflow/models/`, `tests/test_pair_geometry_s8c.py`, `tests/test_s8e_sync_gate_links.py` |
+| TR-GAT (AoI-conditioned relational attention, relation gating, GRU state with BPTT, intent-conformance gate) | `skyflow/models/tr_gat.py` |
+| Baselines: CPA-Rule, Plan-CPA, VO, LSTM-P, Tfm-P, GAT-S, STGCN, TR-GAT-NT | `skyflow/baselines/` |
+| Protocol: validation-selected thresholds, AUPRC, hard regime, paired t-tests with Bonferroni, scenario bootstrap | `skyflow/training/metrics.py`, `scripts/aggregate_main.py` |
+| Event-level metrics (conflict events, lead time, false alert episodes per UAV-hour), SOC curves, EMA/hysteresis operational layer, budget-matched operating points | `skyflow/experiments/events.py`, `scripts/eval_events.py` |
+| Near-miss analysis of false alerts by re-simulating the truth | `skyflow/experiments/nearmiss.py`, `scripts/analyze_nearmiss.py` |
+| Robustness beyond the training link conditions, latency scaling with log-log exponents, CPU-only latency | `scripts/run_robustness.py`, `scripts/run_scaling.py`, `scripts/eval_only.py` |
+| Paper sources (IEEEtran) | `paper/` |
+
+Headline numbers are **not** repeated here: read them from `results/main_summary.csv`,
+`results/events_summary.csv`, `results/events_budget_summary.csv`, `results/robustness_*.csv`,
+`results/scaling_fit.json` and `results/nearmiss.csv`, or from the generated `paper/tables/*.tex`.
+
+---
+
+## Installation
+
+Prerequisites: Python 3.10+, PyTorch 2.2+ (CUDA optional; the full round was run on one RTX 4090).
 
 ```bash
-# Clone and navigate
 git clone https://github.com/liuyushugreat/SkyFlow.git
 cd SkyFlow
-
-# Option A: pip editable install (recommended)
 pip install -e ".[dev]"
-
-# Option B: conda environment
-conda create -n skyflow python=3.10 -y
-conda activate skyflow
-pip install -e ".[dev]"
-
-# Verify installation (runs 23 unit tests)
-bash scripts/setup_env.sh
+python -m pytest -q          # unit tests (labels, no-leakage, AoI sync, gate, events, stats, ...)
 ```
+
+Optional: `export SKYFLOW_CACHE_DIR=/path/with/space` to place the simulated-data cache outside the repo.
 
 ---
 
-## 1-Click Reproducibility
+## Reproduction
+
+The paper is produced by three stages. Stage 1 is the expensive one; stages 2-3 are evaluation only.
 
 ```bash
-# Full reproduction — all tables and figures (~14h on A100)
-bash run.sh
+# 0. (optional) pre-build the simulated train/val/test cache once
+python scripts/build_cache.py --config configs/default.yaml
 
-# Quick pipeline verification (~5 min on CPU)
-bash run.sh --quick
+# 1. training: 9 methods x 3 seeds, then 8 TR-GAT ablations x 3 seeds (resumable)
+python scripts/run_main.py --config configs/default.yaml --results_dir results/main \
+    --methods TR-GAT GAT-S STGCN LSTM-P Tfm-P TR-GAT-NT CPA-Rule Plan-CPA VO --seeds 42 123 456 --max_concurrent 2 --resume
+python scripts/run_main.py --config configs/default.yaml --results_dir results/main \
+    --methods abl_no_conf_gate abl_no_sync abl_no_gru abl_tbptt abl_no_plan abl_no_gating abl_bce abl_telemetry_only \
+    --seeds 42 123 456 --max_concurrent 2 --resume
+
+# 2. unified evaluation (GPU otherwise idle; every latency number comes from this run)
+bash run.sh                                   # Linux/macOS: all S15 stages below
+powershell -ExecutionPolicy Bypass -File scripts/run_s15.ps1    # Windows equivalent
+
+# 3. paper
+cd paper && xelatex skyflow_iscas2027 && bibtex skyflow_iscas2027 && xelatex skyflow_iscas2027 && xelatex skyflow_iscas2027
 ```
 
-This single command installs dependencies, runs 23 unit tests, trains TR-GAT across 5 seeds, evaluates all 6 baselines, performs the scalability sweep, runs Bonferroni-corrected significance tests, and generates all publication figures.
+Stage 2 runs, in order: `eval_only.py` (test metrics + P95 latency per checkpoint), `aggregate_main.py`,
+`aggregate_ablation.py`, `run_robustness.py` (fixed latency / loss levels including levels beyond the
+training mix), `run_scaling.py`, `analyze_attention_aoi.py`, `analyze_gate.py`, `eval_events.py`
+(event metrics, SOC curves, budget-matched operating points selected on validation), `analyze_nearmiss.py`,
+`eval_only.py --device cpu`, then `make_figures.py`, `make_tables.py`, `make_macros.py`.
 
-### Individual Tables
+Quick pipeline check without a GPU: `python scripts/run_main.py --config configs/smoke.yaml --results_dir results/_smoke --methods TR-GAT CPA-Rule --seeds 42`.
 
-```bash
-bash scripts/reproduce_table3.sh      # Table 3: Detection performance
-bash scripts/reproduce_table7.sh      # Table 7: Scalability analysis
-```
+### Configuration
+
+All settings live in `configs/default.yaml` (data, simulator, model, training, scoring). New behaviour
+is always behind a switch whose default is the setting used in the paper; the older behaviour stays
+reproducible (e.g. `features.leakage_free`, `features.pair_edge_features`, `features.plan_context`,
+`model.use_conformance_gate`, `training.tbptt_detach`, `sim.link_mix`). `configs/smoke.yaml` is a tiny
+configuration for tests.
 
 ---
 
-## Training from Scratch
-
-```bash
-# Full reproduction: data generation + TR-GAT (5 seeds) + baselines + figures
-python scripts/reproduce_paper.py --config configs/default.yaml
-
-# Train TR-GAT only
-python scripts/train.py --config configs/default.yaml
-
-# Evaluate a checkpoint
-python scripts/evaluate.py --checkpoint outputs/best_model.pt
-
-# Run all baselines
-python scripts/run_baselines.py
-
-# Scalability sweep (Table 7)
-python scripts/eval_scalability.py
-
-# SDD zero-shot transfer (Table 6, requires SDD data)
-python scripts/eval_sdd_transfer.py --sdd-root /path/to/SDD
-```
-
-### Hyperparameters
-
-All hyperparameters are specified in `configs/default.yaml` and match Table 2 in the paper:
-
-| Parameter | Value |
-|-----------|-------|
-| TR-GAT layers | 4 |
-| Embedding dim | 128 |
-| Attention heads | 4 |
-| Temporal encoding dim | 32 |
-| Recurrent state dim | 64 |
-| Observation window K | 10 epochs (1 s) |
-| Conflict threshold | 0.42 |
-| Focal loss gamma | 2.0 |
-| Learning rate | 3e-4 (AdamW) |
-| Training epochs | 150 |
-| Seeds | 42, 123, 456, 789, 1024 |
-
----
-
-## Architecture
-
-```
-ADS-B Telemetry ─┐
-Flight Plans ────┤                         ┌──────────────┐
-Weather Grid ────┼──► TKG Builder (Alg.1) ─┤  TR-GAT      ├──► Conflict Head ──► PGD Resolution
-Corridor Log ────┘    (< 12 ms)            │  L=4 layers  │    (Eq. 6, 2-MLP)   (Alg. 3, 20 steps)
-                                           │  K=10 window  │
-                   6 relation types        │  GRU recur.   │    Pairwise p_ij
-                   + temporal encoding     └──────────────┘    + avoidance Δp_i
-                     φ(δ) (Eq. 2)
-```
-
----
-
-## Repository Structure
+## Repository structure
 
 ```
 SkyFlow/
-├── run.sh                         # ← START HERE: one-click reproduction
-├── skyflow/                       # Core Python package
-│   ├── models/
-│   │   ├── tr_gat.py              # TR-GAT: Eq. (3)-(5), Algorithm 2
-│   │   ├── temporal_encoding.py   # Sinusoidal temporal encoding φ(δ), Eq. (2)
-│   │   ├── conflict_head.py       # Pairwise conflict scoring, Eq. (6)
-│   │   └── resolution.py          # PGD resolution solver, Algorithm 3
-│   ├── data/
-│   │   ├── tkg_builder.py         # TKG construction, Algorithm 1
-│   │   ├── urbanair500.py         # UrbanAir-500 benchmark (Table 1)
-│   │   └── sdd_adapter.py         # Stanford Drone Dataset adapter
-│   ├── baselines/
-│   │   ├── velocity_obstacle.py   # Reciprocal Velocity Obstacles
-│   │   ├── lstm_pair.py           # LSTM-Pair encoder
-│   │   ├── transformer_pair.py    # Transformer-Pair encoder
-│   │   ├── stgcn.py               # Spatio-Temporal GCN
-│   │   └── gat_static.py          # Static GAT (no temporal encoding)
-│   ├── training/
-│   │   ├── trainer.py             # AdamW + warmup + cosine, K=10 windows
-│   │   ├── losses.py              # Focal loss (γ=2, α=0.75)
-│   │   └── metrics.py             # CDR, FAR, F1, regime analysis, t-tests
-│   └── utils/
-│       └── visualization.py       # Publication-quality figures
-├── scripts/
-│   ├── reproduce_paper.py         # One-click: all tables + figures
-│   ├── reproduce_table3.sh        # Bash: Table 3 (detection performance)
-│   ├── reproduce_table7.sh        # Bash: Table 7 (scalability)
-│   ├── setup_env.sh               # Environment setup + verification
-│   ├── train.py                   # Training entry point
-│   ├── evaluate.py                # Evaluation entry point
-│   ├── run_baselines.py           # Baseline comparison
-│   ├── eval_scalability.py        # Fleet-size latency sweep
-│   └── eval_sdd_transfer.py       # SDD zero-shot transfer
-├── configs/
-│   └── default.yaml               # All hyperparameters (Table 2)
-├── tests/                         # 23 unit tests
-│   ├── test_tr_gat.py
-│   ├── test_tkg_builder.py
-│   └── test_metrics.py
-├── supplementary_experiments/     # Additional ablation & scalability experiments
-│   ├── exp_leakage_ablation.py    # CPA-feature leakage ablation
-│   └── exp_spatial_hashing.py     # Spatial-index construction benchmark
-├── pyproject.toml                 # Package metadata & dependencies
-└── requirements.txt               # Pinned dependencies (alternative)
+├── run.sh                      # stage 2 (unified evaluation + paper artefacts) for bash
+├── skyflow/
+│   ├── data/                   # simulator, conflict causes, labels, TKG builder, cache
+│   ├── models/                 # TR-GAT, temporal encoding, pair geometry, conflict head
+│   ├── baselines/              # rules (CPA, Plan-CPA, VO) and learned baselines
+│   ├── training/               # trainer (BPTT through the window), losses, metrics, statistics
+│   └── experiments/            # event-level metrics, operational layer, near-miss analysis
+├── scripts/                    # training / evaluation / aggregation / paper artefact generators
+│   ├── run_main.py, run_task.py, build_cache.py
+│   ├── eval_only.py, aggregate_main.py, aggregate_ablation.py
+│   ├── run_robustness.py, run_scaling.py, analyze_attention_aoi.py, analyze_gate.py
+│   ├── eval_events.py, analyze_nearmiss.py
+│   ├── make_figures.py, make_tables.py, make_macros.py, paper_common.py
+│   └── run_s15.ps1             # stage 2 for PowerShell
+├── configs/                    # default.yaml (paper), smoke.yaml (tests)
+├── tests/                      # pytest suite
+├── results/                    # metrics.json per run + aggregated CSV/JSON (inputs of the paper)
+├── paper/                      # IEEEtran sources; numbers.tex / tables / figs are generated
+└── docs/                       # compute plan and run log
 ```
----
+
 ## License
 
 This project is licensed under the Apache License 2.0.

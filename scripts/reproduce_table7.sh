@@ -10,13 +10,8 @@
 #   - TR-GAT forward pass
 #   - Total end-to-end
 #
-# Expected output (on A100):
-#   UAVs    Graph(ms)  TR-GAT(ms)  Total(ms)
-#    100        3.1       12.4       15.5
-#    200        7.8       24.7       32.5
-#    300       16.2       41.3       57.5
-#    400       32.4       62.8       95.2
-#    500       58.2       89.1      147.3
+# Legacy (pre-S8) entry point; the current pipeline is scripts/run_main.py + run.sh (see README).
+# Result numbers are never typed here: read results/*.csv or paper/tables/*.tex.
 #
 # Estimated runtime: ~30 min on A100
 # ============================================================

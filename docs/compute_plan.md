@@ -342,6 +342,32 @@ directory produce `tab_events.tex`, 131 macros and `fig_soc.pdf` (TrueType embed
 Deferred (decide after the chain): **B** — pair-level temporal memory inside TR-GAT (a model change,
 needs retraining of all seeds). **C** (temporal consistency loss) not recommended.
 
+### 11.2 Paper skeleton and 4-page budget (10-06 night, while the chain runs)
+
+Done without any result number (all sentences reference macros; comparative wording is marked `%%CHECK`
+in the tex and must be confirmed against `results/` before submission):
+
+- `paper/skyflow_iscas2027.tex`: Results rewritten as Pair-snapshot / Event-level + false-alert budget /
+  Beyond training link conditions / Edge latency and scaling / Ablation; abstract and conclusion updated;
+  setup table removed (its unique rows now in the "Training and protocol" paragraph with new macros
+  `\cfgWeightDecay`, `\cfgWarmupSteps`, `\cfgDropout`); the three single-column result figures replaced by one
+  full-width `fig_results.pdf` (SOC | CDR vs latency | CDR vs loss | scaling; `make_figures.fig_results`, legend
+  positions via `--rob_legend_loc/--scal_legend_loc`); attention-vs-AoI figure dropped (one optional clause in
+  the ablation paragraph); compact author block; gate equation inlined (equations now 1-4).
+- `paper/figs/arch.tex`: adds the AoI-synchronised pair geometry box (shared with baselines), the
+  intent-conformance gate box, BPTT note, operational layer note; equation references updated.
+- Tables fit one column: `tab_main` shows mean+-std on F1 only (other columns mean; `\tabMainNote` reports
+  their max std), `tab_events` mean+-std on the two event-CDR columns (`\tabEventsNote`), `tab_ablation`
+  two variants per row (`--ablation_wide` restores the old layout); `\setlength{\tabcolsep}{2.5pt}`.
+- README rewritten for the current pipeline (no numbers; points to `results/` files); `run.sh` is now the bash
+  twin of `scripts/run_s15.ps1`; legacy `reproduce_table*.sh` headers no longer carry typed numbers.
+
+Page estimate (temp build with partial results, tables padded to 9 methods, dummy robustness/scaling CSVs
+for layout only): body ends ~0.4 page into page 5. Remaining cuts, in order, once the real numbers are in:
+Results prose to the confirmed claims only (-0.2 col), drop the per-cause sentence, `\vspace` around floats,
+shorten the robustness sentence to TR-GAT / TR-GAT-NT / CPA-Rule, Eq. (2) to one line; last resort: drop
+the hard-regime sentence or two ablation rows from the prose (the table keeps them).
+
 ## Conclusion
 
 **Do not rent: the local 4090 (2 concurrent tasks) finishes the main experiment and 3-seed ablations by about 10-07 evening even if every run goes to 150 epochs.**

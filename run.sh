@@ -1,142 +1,41 @@
 #!/usr/bin/env bash
-# ════════════════════════════════════════════════════════════════════
-#  SkyFlow — One-Click Paper Reproduction
-#  Paper:  "SkyFlow: Temporal Relational Graph Attention for
-#           Real-Time UAV Conflict Detection"
-#  Repo:   github.com/liuyushugreat/SkyFlow
-# ════════════════════════════════════════════════════════════════════
+# SkyFlow - stage 2 of the reproduction: unified evaluation + paper artefacts (bash twin of scripts/run_s15.ps1).
 #
-#  Usage:
-#    bash run.sh              # Full reproduction (~14h on A100)
-#    bash run.sh --quick      # Quick verification (~5min on CPU)
+# Run AFTER training has finished (scripts/run_main.py, see README) and while the GPU is otherwise idle:
+# every latency number in the paper comes from this run.  Each stage logs to logs/s15_<stage>.log.
 #
-#  Expected output (full run on A100, Table 3 in the paper):
-#    Method      CDR↑      FAR↓      F1↑    Latency↓
-#    VO         0.6012    0.4231    0.5847     8.4 ms
-#    LSTM-P     0.7856    0.1923    0.7724    23.7 ms
-#    Tfm-P      0.8367    0.1547    0.8241    41.2 ms
-#    STGCN      0.8512    0.1389    0.8384    52.8 ms
-#    GAT-S      0.8794    0.1156    0.8673   124.6 ms
-#    TR-GAT-NT  0.8891    0.1023    0.8782   139.1 ms
-#    TR-GAT     0.9247    0.0734    0.9132   147.3 ms
-# ════════════════════════════════════════════════════════════════════
-set -euo pipefail
+#   bash run.sh                 # all stages
+#   bash run.sh robust scaling  # only the named stages
+#
+# Nothing in this file contains result numbers; read them from results/*.csv|json or paper/tables/*.tex.
+set -uo pipefail
+cd "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+mkdir -p logs
+PYTHON=${PYTHON:-python}
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "$SCRIPT_DIR"
+declare -A STAGES=(
+  [eval]="scripts/eval_only.py --results_dir results/main --out_dir results/eval --latency_epochs 1000"
+  [aggregate]="scripts/aggregate_main.py --results_dir results/main --eval_dir results/eval --out_prefix results/main"
+  [ablation]="scripts/aggregate_ablation.py --results_dir results/main --out_csv results/ablation.csv"
+  [robust]="scripts/run_robustness.py --results_dir results/main --out_dir results"
+  [scaling]="scripts/run_scaling.py --checkpoint results/main/TR-GAT/seed42 --out_csv results/scaling.csv --out_fit results/scaling_fit.json"
+  [attention]="scripts/analyze_attention_aoi.py --checkpoint results/main/TR-GAT/seed42 --out_csv results/attention_vs_aoi.csv"
+  [gate]="scripts/analyze_gate.py --checkpoint results/main/TR-GAT/seed42 --out_csv results/gate_by_cause.csv"
+  [events]="scripts/eval_events.py --results_dir results/main --out_dir results --persistence 1 3"
+  [nearmiss]="scripts/analyze_nearmiss.py --checkpoints results/main/TR-GAT/seed42 results/main/GAT-S/seed42 results/main/CPA-Rule/seed42 results/main/Plan-CPA/seed42 --budget_csv results/events_budget.csv --out_csv results/nearmiss.csv"
+  [cpulat]="scripts/eval_only.py --results_dir results/main --methods TR-GAT --seeds 42 --device cpu --skip_graph_build --latency_epochs 200 --out_dir results/eval_cpu"
+  [figures]="scripts/make_figures.py --results_dir results --out_dir paper/figs"
+  [tables]="scripts/make_tables.py --results_dir results --out_dir paper/tables"
+  [macros]="scripts/make_macros.py --results_dir results --out paper/numbers.tex"
+)
+ORDER=(eval aggregate ablation robust scaling attention gate events nearmiss cpulat figures tables macros)
 
-if command -v python3 &>/dev/null; then
-    PYTHON=${PYTHON:-python3}
-elif command -v python &>/dev/null; then
-    PYTHON=${PYTHON:-python}
-else
-    echo "[ERROR] Neither python3 nor python found in PATH."
-    exit 1
-fi
-DEVICE=${DEVICE:-auto}
-
-# ── Parse arguments ──
-QUICK=false
-SKIP_BASELINES=false
-EXTRA_ARGS=""
-for arg in "$@"; do
-    case $arg in
-        --quick)       QUICK=true ;;
-        --skip-baselines) SKIP_BASELINES=true ;;
-        --device=*)    DEVICE="${arg#*=}" ;;
-        *)             EXTRA_ARGS="$EXTRA_ARGS $arg" ;;
-    esac
+if [ "$#" -gt 0 ]; then ORDER=("$@"); fi
+t0=$(date +%s)
+for s in "${ORDER[@]}"; do
+  if [ -z "${STAGES[$s]+x}" ]; then echo "unknown stage: $s"; exit 2; fi
+  echo "[$(date +%H:%M:%S)] $s: $PYTHON ${STAGES[$s]}"
+  $PYTHON ${STAGES[$s]} > "logs/s15_$s.log" 2>&1
+  echo "[$(date +%H:%M:%S)] $s exit=$?"
 done
-
-echo ""
-echo "╔══════════════════════════════════════════════════════════════╗"
-echo "║  SkyFlow — Paper Reproduction                              ║"
-echo "║  Temporal Relational Graph Attention for Real-Time          ║"
-echo "║  UAV Conflict Detection                                    ║"
-echo "╚══════════════════════════════════════════════════════════════╝"
-echo ""
-
-# ── Step 0: Environment check ──
-echo "[Step 0] Checking environment..."
-
-PY_VERSION=$($PYTHON -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")' 2>/dev/null || echo "none")
-if [ "$PY_VERSION" = "none" ]; then
-    echo "[ERROR] Python not found. Please install Python 3.10+."
-    echo "        Recommended: conda create -n skyflow python=3.10 -y"
-    exit 1
-fi
-echo "  Python:  $PY_VERSION"
-
-# Check if skyflow package is importable
-if ! $PYTHON -c "import skyflow" 2>/dev/null; then
-    echo "  [INFO] SkyFlow not installed. Installing now..."
-    $PYTHON -m pip install -e ".[dev]" --quiet
-fi
-
-# Verify core imports
-$PYTHON -c "
-from skyflow.config import SkyFlowConfig
-from skyflow.models.tr_gat import TRGAT
-from skyflow.training.trainer import SkyFlowTrainer
-print('  Imports: OK')
-"
-
-# Check device
-ACTUAL_DEVICE=$($PYTHON -c "
-import torch
-if '$DEVICE' == 'auto':
-    d = 'cuda' if torch.cuda.is_available() else 'cpu'
-else:
-    d = '$DEVICE'
-print(d)
-")
-echo "  Device:  $ACTUAL_DEVICE"
-
-# Show seed protocol
-echo "  Seeds:   42, 123, 456, 789, 1024"
-
-if [ "$QUICK" = "true" ]; then
-    echo "  Mode:    QUICK (50 UAVs, 10 epochs, 2 seeds — for pipeline verification)"
-else
-    echo "  Mode:    FULL (500 UAVs, 150 epochs, 5 seeds — matches paper)"
-fi
-echo ""
-
-# ── Step 1: Run unit tests ──
-echo "[Step 1] Running unit tests..."
-if $PYTHON -m pytest --version &>/dev/null; then
-    $PYTHON -m pytest tests/ -q --tb=line 2>&1 | tail -5
-else
-    echo "  [WARN] pytest not found; installing dev dependencies..."
-    $PYTHON -m pip install -e ".[dev]" --quiet
-    $PYTHON -m pytest tests/ -q --tb=line 2>&1 | tail -5
-fi
-echo ""
-
-# ── Step 2: Run the full reproduction pipeline ──
-echo "[Step 2] Running full reproduction pipeline..."
-echo "         (Data generation → TR-GAT training → Baselines → Scalability → Significance tests → Figures)"
-echo ""
-
-ARGS="--config configs/default.yaml --device $DEVICE"
-if [ "$QUICK" = "true" ]; then
-    ARGS="$ARGS --quick"
-fi
-if [ "$SKIP_BASELINES" = "true" ]; then
-    ARGS="$ARGS --skip-baselines"
-fi
-
-$PYTHON scripts/reproduce_paper.py $ARGS $EXTRA_ARGS
-
-echo ""
-echo "╔══════════════════════════════════════════════════════════════╗"
-echo "║  REPRODUCTION FINISHED                                     ║"
-echo "║                                                            ║"
-echo "║  Output files:                                             ║"
-echo "║    outputs/all_results.json        — Table 3 metrics       ║"
-echo "║    outputs/multi_seed_results.json  — Per-seed breakdown   ║"
-echo "║    outputs/scalability_results.json — Table 7 latency      ║"
-echo "║    outputs/significance_tests.json  — Table 5 t-tests      ║"
-echo "║    outputs/charts/                  — Publication figures   ║"
-echo "╚══════════════════════════════════════════════════════════════╝"
-echo ""
+echo "S15 finished in $(( ($(date +%s) - t0) / 60 )) min"

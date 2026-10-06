@@ -7,15 +7,8 @@
 # This script trains TR-GAT and all 6 baselines across 5 seeds,
 # then prints the comparison table matching Table 3 in the paper.
 #
-# Expected output (full run on A100):
-#   Method      CDR↑     FAR↓      F1↑    Latency(ms)↓
-#   VO         0.6012   0.4231   0.5847        8.4
-#   LSTM-P     0.7856   0.1923   0.7724       23.7
-#   Tfm-P      0.8367   0.1547   0.8241       41.2
-#   STGCN      0.8512   0.1389   0.8384       52.8
-#   GAT-S      0.8794   0.1156   0.8673      124.6
-#   TR-GAT-NT  0.8891   0.1023   0.8782      139.1
-#   TR-GAT     0.9247   0.0734   0.9132      147.3
+# Legacy (pre-S8) entry point; the current pipeline is scripts/run_main.py + run.sh (see README).
+# Result numbers are never typed here: read results/*.csv or paper/tables/*.tex.
 #
 # Estimated runtime: ~14 hours on A100, ~5 min with --quick
 # ============================================================

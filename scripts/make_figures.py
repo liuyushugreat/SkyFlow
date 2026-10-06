@@ -8,6 +8,7 @@ Outputs (PDF, single-column 3.5 in, 8 pt, TrueType fonts - no Type 3):
   fig_attention_aoi.pdf in-degree-normalised attention vs AoI delta, one line per relation
   fig_lead.pdf          fraction of conflict events alerted with >= x s lead (event-level, S8f)
   fig_soc.pdf           SOC curve: event CDR vs false alert episodes per UAV-hour, raw and with the operational layer
+  fig_results.pdf       full-width 4-panel figure (SOC | CDR vs latency | CDR vs loss | scaling) for the 4-page budget
 """
 
 import argparse
@@ -54,44 +55,55 @@ def _save(fig, path):
 
 # --------------------------------------------------------------------------- robustness
 def fig_robustness(lat_csv, loss_csv, methods, out):
-    panels = []
-    if lat_csv.exists():
-        d = pd.read_csv(lat_csv)
-        d["x"] = d["value"]                        # nominal latency L; actual draw is U(L(1-j), L(1+j))
-        panels.append((d, "ADS-B latency $L$ (s)"))
-    if loss_csv.exists():
-        d = pd.read_csv(loss_csv)
-        d["x"] = d["value"] * 100.0
-        panels.append((d, "Packet loss (%)"))
+    panels = _robustness_panels(lat_csv, loss_csv)   # nominal latency L; actual draw is U(L(1-j), L(1+j))
     if not panels:
         print("[skip] no robustness csv"); return None
     fig, axes = plt.subplots(1, len(panels), figsize=(COL_W, 1.55), sharey=True)
     axes = np.atleast_1d(axes)
     meta = {}
     for ax, (d, xlabel) in zip(axes, panels):
-        for m in methods:
-            dm = d[d["method"] == m]
-            if dm.empty:
-                continue
-            g = dm.groupby("x")["cdr"].agg(["mean", "std", "count"]).reset_index().sort_values("x")
-            mk, ls = _style(m)
-            ax.errorbar(g["x"], g["mean"], yerr=g["std"].fillna(0.0), marker=mk, ls=ls, capsize=1.5,
-                        elinewidth=0.6, label=m)
-            meta[f"{xlabel}|{m}"] = g.to_dict("records")
-        # S8f: shade the levels beyond the training link mix (extrapolation)
-        if "in_train_range" in d.columns and (d["in_train_range"] == 0).any() and (d["in_train_range"] == 1).any():
-            x_in = float(d[d["in_train_range"] == 1]["x"].max())
-            x_out = sorted(d[d["in_train_range"] == 0]["x"].unique())
-            edge = 0.5 * (x_in + x_out[0])
-            ax.axvspan(edge, x_out[-1] + 0.5 * (x_out[-1] - x_in) / max(len(x_out), 1), color="0.85", lw=0, zorder=0)
-            ax.text(0.98, 0.04, "beyond\ntraining", transform=ax.transAxes, fontsize=6, ha="right", va="bottom",
-                    color="0.35")
-            meta[f"{xlabel}|train_max"] = x_in
-        ax.set_xlabel(xlabel)
-        ax.grid(alpha=0.3, lw=0.4)
+        meta.update(_draw_robustness_panel(ax, d, xlabel, methods))
     axes[0].set_ylabel("CDR")
     axes[0].legend(handlelength=1.8, loc="best")
     _save(fig, out)
+    return meta
+
+
+def _robustness_panels(lat_csv, loss_csv):
+    panels = []
+    if lat_csv.exists():
+        d = pd.read_csv(lat_csv)
+        d["x"] = d["value"]
+        panels.append((d, "ADS-B latency $L$ (s)"))
+    if loss_csv.exists():
+        d = pd.read_csv(loss_csv)
+        d["x"] = d["value"] * 100.0
+        panels.append((d, "Packet loss (%)"))
+    return panels
+
+
+def _draw_robustness_panel(ax, d, xlabel, methods):
+    meta = {}
+    for m in methods:
+        dm = d[d["method"] == m]
+        if dm.empty:
+            continue
+        g = dm.groupby("x")["cdr"].agg(["mean", "std", "count"]).reset_index().sort_values("x")
+        mk, ls = _style(m)
+        ax.errorbar(g["x"], g["mean"], yerr=g["std"].fillna(0.0), marker=mk, ls=ls, capsize=1.5,
+                    elinewidth=0.6, label=m)
+        meta[f"{xlabel}|{m}"] = g.to_dict("records")
+    # S8f: shade the levels beyond the training link mix (extrapolation)
+    if "in_train_range" in d.columns and (d["in_train_range"] == 0).any() and (d["in_train_range"] == 1).any():
+        x_in = float(d[d["in_train_range"] == 1]["x"].max())
+        x_out = sorted(d[d["in_train_range"] == 0]["x"].unique())
+        edge = 0.5 * (x_in + x_out[0])
+        ax.axvspan(edge, x_out[-1] + 0.5 * (x_out[-1] - x_in) / max(len(x_out), 1), color="0.85", lw=0, zorder=0)
+        ax.text(0.98, 0.04, "beyond\ntraining", transform=ax.transAxes, fontsize=6, ha="right", va="bottom",
+                color="0.35")
+        meta[f"{xlabel}|train_max"] = x_in
+    ax.set_xlabel(xlabel)
+    ax.grid(alpha=0.3, lw=0.4)
     return meta
 
 
@@ -99,10 +111,16 @@ def fig_robustness(lat_csv, loss_csv, methods, out):
 def fig_scaling(csv, fit_json, out):
     if not csv.exists():
         print("[skip] no scaling csv"); return None
+    fig, ax = plt.subplots(figsize=(COL_W, 1.8))
+    meta = _draw_scaling(ax, csv, fit_json, legend_ncol=2)
+    _save(fig, out)
+    return meta
+
+
+def _draw_scaling(ax, csv, fit_json, legend_ncol=2, legend_fontsize=None, legend_loc="best"):
     d = pd.read_csv(csv)
     d = d[d["status"] == "ok"].sort_values("num_uavs")
     fits = json.load(open(fit_json))["fits"] if fit_json.exists() else {}
-    fig, ax = plt.subplots(figsize=(COL_W, 1.8))
     series = [("total_p95_ms", "total", "o", "-"), ("graph_build_p95_ms", "graph build", "s", "--"),
               ("gnn_forward_p95_ms", "GNN forward", "^", "-."), ("pair_scoring_p95_ms", "pair scoring", "v", ":")]
     for col, name, mk, ls in series:
@@ -118,8 +136,7 @@ def fig_scaling(csv, fit_json, out):
     ax.xaxis.set_major_formatter(matplotlib.ticker.ScalarFormatter())
     ax.xaxis.set_minor_formatter(matplotlib.ticker.NullFormatter())
     ax.grid(alpha=0.3, lw=0.4, which="major")
-    ax.legend(ncol=2, handlelength=1.8, columnspacing=0.8, loc="best")
-    _save(fig, out)
+    ax.legend(ncol=legend_ncol, handlelength=1.6, columnspacing=0.6, loc=legend_loc, fontsize=legend_fontsize)
     return {"sizes": d["num_uavs"].tolist(), "alpha": {k: v.get("alpha") for k, v in fits.items()}}
 
 
@@ -194,11 +211,17 @@ def fig_soc(soc_csv, events_csv, budget_csv, methods, out, layer_method="TR-GAT"
     points; rules are single points."""
     if not soc_csv.exists():
         print("[skip] no events_soc.csv"); return None
+    fig, ax = plt.subplots(figsize=(COL_W, 1.9))
+    meta = _draw_soc(ax, soc_csv, events_csv, budget_csv, methods, layer_method)
+    _save(fig, out)
+    return meta
+
+
+def _draw_soc(ax, soc_csv, events_csv, budget_csv, methods, layer_method="TR-GAT", legend_fontsize=None):
     d = pd.read_csv(soc_csv)
     d = d[d["split"] == "test"]
     ev = pd.read_csv(events_csv) if events_csv.exists() else None
     bud = pd.read_csv(budget_csv) if budget_csv.exists() else None
-    fig, ax = plt.subplots(figsize=(COL_W, 1.9))
     meta = {}
     for m in methods:
         dm = d[d["method"] == m]
@@ -241,7 +264,52 @@ def fig_soc(soc_csv, events_csv, budget_csv, methods, out, layer_method="TR-GAT"
     ax.set_ylabel("Event CDR")
     ax.set_ylim(0, 1)
     ax.grid(alpha=0.3, lw=0.4, which="both")
-    ax.legend(handlelength=1.8, loc="lower right", ncol=1)
+    ax.legend(handlelength=1.8, loc="lower right", ncol=1, fontsize=legend_fontsize)
+    return meta
+
+
+# --------------------------------------------------------------------------- combined results figure (page budget)
+TEXT_W = 7.16         # IEEE two-column text width (in)
+
+
+def fig_results(R, methods, out, layer_method="TR-GAT", rob_legend_loc="lower left", scal_legend_loc="lower right"):
+    """One full-width figure* with up to four panels: (a) SOC curve, (b) CDR vs
+    latency, (c) CDR vs packet loss, (d) P95 latency scaling.  Same data and
+    drawing code as the single-column figures; panels whose CSV is missing are
+    skipped so the layout degrades gracefully."""
+    panels = []
+    if (R / "events_soc.csv").exists():
+        panels.append(("soc", None))
+    for d, xlabel in _robustness_panels(R / "robustness_latency.csv", R / "robustness_loss.csv"):
+        panels.append(("rob", (d, xlabel)))
+    if (R / "scaling.csv").exists():
+        panels.append(("scal", None))
+    if not panels:
+        print("[skip] combined results figure: no inputs"); return None
+    widths = [1.15 if k == "soc" else (1.0 if k == "scal" else 0.85) for k, _ in panels]
+    fig, axes = plt.subplots(1, len(panels), figsize=(TEXT_W, 1.5), gridspec_kw={"width_ratios": widths})
+    axes = np.atleast_1d(axes)
+    meta, rob_axes = {}, []
+    for ax, (kind, payload), letter in zip(axes, panels, "abcdef"):
+        if kind == "soc":
+            meta["soc"] = _draw_soc(ax, R / "events_soc.csv", R / "events.csv", R / "events_budget.csv", methods,
+                                    layer_method, legend_fontsize=6)
+        elif kind == "rob":
+            d, xlabel = payload
+            meta.setdefault("robustness", {}).update(_draw_robustness_panel(ax, d, xlabel, methods))
+            rob_axes.append(ax)
+        else:
+            meta["scaling"] = _draw_scaling(ax, R / "scaling.csv", R / "scaling_fit.json", legend_ncol=1,
+                                            legend_fontsize=6, legend_loc=scal_legend_loc)
+        ax.set_title(f"({letter})", fontsize=8, loc="left", pad=2)
+    if rob_axes:
+        rob_axes[0].set_ylabel("CDR")
+        # legend in the last robustness panel (loss) - the curves of the latency panel are the ones to read
+        rob_axes[-1].legend(handlelength=1.4, loc=rob_legend_loc, fontsize=5.5, labelspacing=0.25)
+        for ax in rob_axes[1:]:
+            ax.sharey(rob_axes[0])
+            ax.tick_params(labelleft=False)
+    fig.subplots_adjust(wspace=0.32)
     _save(fig, out)
     return meta
 
@@ -252,6 +320,8 @@ def main():
     ap.add_argument("--out_dir", default="paper/figs")
     ap.add_argument("--methods", nargs="+", default=["TR-GAT", "TR-GAT-NT", "GAT-S", "CPA-Rule", "Plan-CPA"])
     ap.add_argument("--attention_layer", type=int, default=None)
+    ap.add_argument("--rob_legend_loc", default="lower left", help="legend position in the loss panel of fig_results")
+    ap.add_argument("--scal_legend_loc", default="lower right", help="legend position in the scaling panel of fig_results")
     args = ap.parse_args()
     R, O = Path(args.results_dir), Path(args.out_dir)
     info = {
@@ -261,6 +331,8 @@ def main():
         "attention": fig_attention(R / "attention_vs_aoi.csv", O / "fig_attention_aoi.pdf", args.attention_layer),
         "lead": fig_lead(R / "events_lead.npz", R / "events.csv", args.methods, O / "fig_lead.pdf"),
         "soc": fig_soc(R / "events_soc.csv", R / "events.csv", R / "events_budget.csv", args.methods, O / "fig_soc.pdf"),
+        "results": fig_results(R, args.methods, O / "fig_results.pdf", rob_legend_loc=args.rob_legend_loc,
+                               scal_legend_loc=args.scal_legend_loc),
     }
     O.mkdir(parents=True, exist_ok=True)
     json.dump({"results_dir": str(R), **info}, open(O / "figures_provenance.json", "w"), indent=2, default=str)
