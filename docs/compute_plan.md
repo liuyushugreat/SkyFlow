@@ -258,8 +258,22 @@ end-to-end TR-GAT step with gate + BPTT); smoke run of CPA-Rule, Plan-CPA, TR-GA
 abl_no_plan OK. The S8d-2 chain driver and run_main were stopped (STGCN workers left to finish); their
 results are archived, not committed.
 
-Plan: build caches → 1-seed validation selection of TR-GAT capacity (128/4 vs 64/2) on **val only** →
-3 seeds of all methods + ablations → S15 → paper. Budget: one full round before the 10-14 deadline.
+Caches (link_mix): train `1f4a3399a8306873` (1018 s, 273,457 positives - labels unchanged), val
+`3c42abfaf48df364`, test `66af77676a246eb1` (`logs/build_cache_s8e.log`).
+
+**Validation-only capacity selection (seed 42, `results/_select`, `logs/select*.log`):**
+
+| run | params | val best-F1 (epoch) | val AUPRC | note |
+|---|---|---|---|---|
+| TR-GAT L=4, d=128 (`configs/trgat_large.yaml`) | 1.16 M | 0.403 @36 | 0.372 | stopped at epoch 36 (still rising slowly) |
+| TR-GAT L=2, d=64 (now `default.yaml`) | 0.23 M | **0.426 @46** (0.422 @36) | 0.415 | early stop 61; test F1 0.418 |
+| GAT-S (reference) | 0.18 M | 0.419 @27 | 0.414 | test F1 0.416 |
+
+Epoch-1 val AUPRC of TR-GAT went from 0.007 (S8d-2) to 0.175 with the shorter warm-up and BPTT. The
+compact TR-GAT was selected on val and its seed-42 run reused as `results/main/TR-GAT/seed42` (identical
+config; `metrics.json.config_path` still names the former `trgat_compact.yaml`). Full round launched
+18:49 (`logs/chain_s8e.log`): main 9 methods x 3 seeds → 8 ablations x 3 seeds (most important first)
+→ S15 → paper build → Balanced power plan. Expected ≈ 25–30 h.
 
 ## Conclusion
 
