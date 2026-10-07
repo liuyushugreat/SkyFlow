@@ -54,10 +54,37 @@ def _kind(method):
         return None
 
 
-def _group_summaries(M, S):
+def _tex(name):
+    return str(name).replace("_", "\\_")
+
+
+def _names(ms):
+    """'A', 'A and B', 'A, B and C' (LaTeX-escaped) - for lists of method names in running text."""
+    ms = [_tex(m) for m in ms]
+    if not ms:
+        return "none"
+    return ms[0] if len(ms) == 1 else ", ".join(ms[:-1]) + " and " + ms[-1]
+
+
+# causes as they appear in events_by_cause.csv / per-regime rows -> running-text labels
+CAUSE_LABEL = {"planned_crossing": "planned crossings", "wind_deviation": "wind deviations",
+               "nonconforming": "non-conforming flights", "noncooperative": "non-cooperative aircraft",
+               "priority_insertion": "priority insertions"}
+
+# ablation variants by what they remove: an *input* (information / its synchronisation) or an *encoder* part
+ABL_INPUT_SIDE = ["abl_no_sync", "abl_no_plan", "abl_telemetry_only", "abl_no_conf_gate"]
+ABL_ENCODER_SIDE = ["TR-GAT-NT", "abl_no_gating", "abl_no_gru", "abl_tbptt", "abl_bce"]
+
+
+def _group_summaries(M, S, res=None, ref="TR-GAT"):
     """\\learnedFOneMin/Max/SpreadPts, \\learnedFOneBestName, \\learnedAuprcMin/Max, \\ruleFOneBest/BestName,
     \\gainMinLearnedOverRulePts (weakest learned detector minus best rule, in percentage points),
-    \\gainBestLearnedOverRulePts, \\nLearned, \\nRules - from the main summary table (methods of the main group)."""
+    \\gainBestLearnedOverRulePts, \\nLearned, \\nRules - from the main summary table (methods of the main group).
+    S8g/S19 additions that settle the ranking words of the Results text from the data:
+    \\learnedCdrBest/BestName (highest CDR among learned), \\learnedFarBest/BestName (lowest FAR),
+    \\refCdrRankWord ("the highest" / "the second-highest" / ...) for the reference's CDR among learned methods,
+    \\mainNSignificantFOne + \\mainSignificantFOneNames (learned methods whose F1 differs from the reference at
+    Bonferroni p < 0.05)."""
     rows = {m: r for m, r in S.iterrows() if _num_ok(r.get("f1_mean"))}
     learned = {m: r for m, r in rows.items() if _kind(m) in ("trgat", "learned")}
     rules = {m: r for m, r in rows.items() if _kind(m) == "rule"}
@@ -68,11 +95,25 @@ def _group_summaries(M, S):
         lo, hi = min(f, key=f.get), max(f, key=f.get)
         M.num("learnedFOneMin", f[lo]); M.num("learnedFOneMax", f[hi])
         M.add("learnedFOneSpreadPts", f"{(f[hi] - f[lo]) * 100:.1f}")
-        M.add("learnedFOneBestName", hi.replace("_", "\\_")); M.add("learnedFOneWorstName", lo.replace("_", "\\_"))
+        M.add("learnedFOneBestName", _tex(hi)); M.add("learnedFOneWorstName", _tex(lo))
         if all("auprc_mean" in r and _num_ok(r["auprc_mean"]) for r in learned.values()):
             a = {m: float(r["auprc_mean"]) for m, r in learned.items()}
             M.num("learnedAuprcMin", min(a.values())); M.num("learnedAuprcMax", max(a.values()))
-            M.add("learnedAuprcBestName", max(a, key=a.get).replace("_", "\\_"))
+            M.add("learnedAuprcBestName", _tex(max(a, key=a.get)))
+        if all(_num_ok(r.get("cdr_mean")) and _num_ok(r.get("far_mean")) for r in learned.values()):
+            c = {m: float(r["cdr_mean"]) for m, r in learned.items()}
+            fa = {m: float(r["far_mean"]) for m, r in learned.items()}
+            bc, bf = max(c, key=c.get), min(fa, key=fa.get)
+            M.num("learnedCdrBest", c[bc]); M.add("learnedCdrBestName", _tex(bc))
+            M.num("learnedFarBest", fa[bf]); M.add("learnedFarBestName", _tex(bf))
+            if ref in c:
+                rank = 1 + sum(v > c[ref] for v in c.values())
+                M.add("refCdrRankWord", {1: "the highest", 2: "the second-highest", 3: "the third-highest"}.get(
+                    rank, f"the {_DIGITS[rank].lower()}th-highest" if rank < 10 else f"rank {rank}"))
+        if res is not None:
+            sig = [m for m in learned if m != ref and _num_ok(res.p_value("f1", m)) and float(res.p_value("f1", m)) < 0.05]
+            M.add("mainNSignificantFOne", len(sig))
+            M.add("mainSignificantFOneNames", _names(sig))
     if rules:
         f = {m: float(r["f1_mean"]) for m, r in rules.items()}
         best = max(f, key=f.get)
@@ -153,7 +194,7 @@ def main():
                         M.add(macro_name("p" + {"f1": "FOne", "cdr": "Cdr", "far": "Far"}[met], m), fmt_p(float(p)))
         # S8g cross-method summaries for the protocol-centred Results text: spread of the learned detectors,
         # best rule, gap of the weakest / best learned detector over the best rule (percentage points).
-        _group_summaries(M, S)
+        _group_summaries(M, S, res, ref)
         # dataset facts from one metrics.json
         tm = res.any_task_metrics(ref) or res.any_task_metrics() or {}
         ds, test, env = tm.get("dataset", {}), tm.get("test", {}), tm.get("env", {})
@@ -179,6 +220,8 @@ def main():
         M.num(key + "Score", inf.get("pair_scoring_p95_ms"), 1)
         M.num(key + "Build", gb.get("graph_build_p95_ms"), 1)
         M.num(key + "Sum", lat.get("p95_sum_ms"), 1)
+        if _num_ok(lat.get("p95_sum_ms")):          # S19: "within" / "beyond" the 200 ms edge budget on CPU
+            M.add(key + "BudgetWord", "within" if float(lat["p95_sum_ms"]) <= 200.0 else "beyond")
         if j.get("env", {}).get("cpu_model"):
             M.add(key + "Host", str(j["env"]["cpu_model"]).replace("_", "\\_"))
 
@@ -234,6 +277,20 @@ def main():
                 sig = ab[ab["p_f1_bonf"].apply(_num_ok) & (ab["p_f1_bonf"].astype(float) < 0.05)]
                 M.add("ablNSignificant", len(sig))
                 M.add("ablNVariants", len(ab))
+                M.add("ablSignificantNames", _names(list(sig["method"])))
+            # S19: input-side vs encoder-side variants - mean / max |dF1| in points, so the sentence
+            # "components that touch the inputs matter more than those that touch the encoder" is checked by data
+            d = {str(r["method"]): abs(float(r["d_f1"])) * 100 for _, r in ab.iterrows()}
+            for tag, side in (("Inputs", ABL_INPUT_SIDE), ("Encoder", ABL_ENCODER_SIDE)):
+                v = {m: d[m] for m in side if m in d}
+                if v:
+                    M.add(f"abl{tag}N", len(v))
+                    M.add(f"abl{tag}MeanAbsDPts", f"{np.mean(list(v.values())):.1f}")
+                    M.add(f"abl{tag}MaxAbsDPts", f"{max(v.values()):.1f}")
+                    M.add(f"abl{tag}MaxAbsDName", _tex(max(v, key=v.get)))
+            vi = [d[m] for m in ABL_INPUT_SIDE if m in d]; ve = [d[m] for m in ABL_ENCODER_SIDE if m in d]
+            if vi and ve:
+                M.add("ablInputsVsEncoderWord", "more" if np.mean(vi) > np.mean(ve) else "less")
 
     # ---- robustness -----------------------------------------------------
     for tag, df, scale in (("Lat", res.rob_latency, 1.0), ("Loss", res.rob_loss, 100.0)):
@@ -420,6 +477,15 @@ def main():
             for _, r in g.iterrows():
                 M.num(macro_name("evCdrCause", r["cause"], r["method"]), r["event_cdr"], 3)
                 M.num(macro_name("evLeadCause", r["cause"], r["method"]), r["lead_median_s"], 1)
+            # S19: easiest / hardest cause per method (running-text labels), e.g. \evCdrCauseMinLabelTrGat
+            for m, gm in g.groupby("method"):
+                v = {str(r["cause"]): float(r["event_cdr"]) for _, r in gm.iterrows() if _num_ok(r["event_cdr"])}
+                if len(v) >= 2:
+                    lo, hi = min(v, key=v.get), max(v, key=v.get)
+                    M.add(macro_name("evCdrCauseMinLabel", m), CAUSE_LABEL.get(lo, _tex(lo)))
+                    M.add(macro_name("evCdrCauseMaxLabel", m), CAUSE_LABEL.get(hi, _tex(hi)))
+                    M.num(macro_name("evCdrCauseMin", m), v[lo], 3)
+                    M.num(macro_name("evCdrCauseMax", m), v[hi], 3)
 
     # ---- near-miss analysis of false alerts (S8f) -------------------------
     # \nm<Group><Stat><Method> at the validation-F1 operating point, e.g. \nmFalseRowsLtTwoTrGat (fraction of false
