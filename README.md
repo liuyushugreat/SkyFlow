@@ -1,12 +1,15 @@
-# SkyFlow: AoI-Aware Temporal Relational Graph Attention for Real-Time UAV Conflict Detection at the Edge
+# SkyFlow: What Does Learning Add to Rule-Based UAV Conflict Detection under Stale Surveillance at the Edge?
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![PyTorch 2.2+](https://img.shields.io/badge/PyTorch-2.2+-EE4C2C.svg)](https://pytorch.org/)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
-> Code, configuration and result files for the SkyFlow paper (TR-GAT: temporal relational graph attention
-> conditioned on the age of information of every edge, with AoI-synchronised pair geometry and an
-> intent-conformance gate), evaluated under a leakage-free, event-level protocol.
+> Code, configuration and result files for the SkyFlow paper: a leakage-free, operational evaluation of
+> UAV conflict detection under stale surveillance (per-scenario ADS-B latency and loss), in which three
+> geometric rules and six learned detectors receive the same AoI-synchronised pair geometry and are
+> compared at the level of conflict events under a common false-alert budget. TR-GAT (temporal relational
+> graph attention conditioned on the age of information of every edge, recurrent state, intent-conformance
+> gate) is the graph-based reference model of that comparison.
 
 **Every number in the paper is generated from files under `results/` by the scripts in `scripts/`;
 nothing is typed by hand.** `paper/numbers.tex`, `paper/tables/*.tex` and `paper/figs/*.pdf` are
@@ -71,8 +74,9 @@ python scripts/run_main.py --config configs/default.yaml --results_dir results/m
 bash run.sh                                   # Linux/macOS: all S15 stages below
 powershell -ExecutionPolicy Bypass -File scripts/run_s15.ps1    # Windows equivalent
 
-# 3. paper
-cd paper && xelatex skyflow_iscas2027 && bibtex skyflow_iscas2027 && xelatex skyflow_iscas2027 && xelatex skyflow_iscas2027
+# 3. paper (+ submission gate: fonts embedded / no Type 3, page rule, no undefined macro, no smoke numbers)
+cd paper && xelatex skyflow_iscas2027 && bibtex skyflow_iscas2027 && xelatex skyflow_iscas2027 && xelatex skyflow_iscas2027 && cd ..
+python scripts/check_paper.py --paper_dir paper
 ```
 
 Stage 2 runs, in order: `eval_only.py` (test metrics + P95 latency per checkpoint), `aggregate_main.py`,
@@ -88,8 +92,13 @@ Quick pipeline check without a GPU: `python scripts/run_main.py --config configs
 All settings live in `configs/default.yaml` (data, simulator, model, training, scoring). New behaviour
 is always behind a switch whose default is the setting used in the paper; the older behaviour stays
 reproducible (e.g. `features.leakage_free`, `features.pair_edge_features`, `features.plan_context`,
-`model.use_conformance_gate`, `training.tbptt_detach`, `sim.link_mix`). `configs/smoke.yaml` is a tiny
-configuration for tests.
+`model.use_conformance_gate`, `training.tbptt_detach`, `training.state_carry`, `sim.link_mix`).
+`configs/smoke.yaml` is a tiny configuration for tests.
+
+Methods are registered in `skyflow/experiments/methods.py` with a group: `main` (paper tables),
+`ablation` (TR-GAT minus one component) and `variant` (recorded negative results that stay out of the
+paper and of the Bonferroni family, e.g. `TR-GAT-SC`, GRU state carried across the windows of a
+scenario; `docs/compute_plan.md` §12.3).
 
 ---
 
@@ -110,6 +119,7 @@ SkyFlow/
 │   ├── run_robustness.py, run_scaling.py, analyze_attention_aoi.py, analyze_gate.py
 │   ├── eval_events.py, analyze_nearmiss.py
 │   ├── make_figures.py, make_tables.py, make_macros.py, paper_common.py
+│   ├── check_paper.py          # submission gate for the compiled PDF
 │   └── run_s15.ps1             # stage 2 for PowerShell
 ├── configs/                    # default.yaml (paper), smoke.yaml (tests)
 ├── tests/                      # pytest suite

@@ -11,10 +11,11 @@ build/
 
 # local planning doc (contains personal info)
 docs/SKYFLOW_PLAN.md
-results/_smoke/
-results/_dryrun/
+# smoke / dry-run / sanity / partial-analysis scratch directories
+results/_*/
+# superseded rounds (S8d-2), kept locally only
+results/archive/
 logs/
-results/_sanity/
 
 # LaTeX build files (paper/)
 paper/*.aux
