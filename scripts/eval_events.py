@@ -44,6 +44,7 @@ from skyflow.experiments.env_info import env_info
 from skyflow.experiments.events import (event_metrics, filtered_alerts, score_table, select_operating_point,
                                         soc_curve, threshold_grid)
 from skyflow.experiments.loader import list_tasks, load_task
+from skyflow.experiments.methods import METHODS
 from skyflow.experiments.stats import bonferroni, paired_ttest
 
 SUMMARY_METRICS = ("event_cdr", "timely_cdr", "lead_mean_s", "lead_median_s", "lead_frac", "episode_precision",
@@ -123,6 +124,15 @@ def _summarise_one(rows, reference, metrics, tests_on):
     return out, tests
 
 
+def select_tasks(results_dir, methods=None, seeds=None):
+    """Finished tasks to evaluate.  Default (methods=None): every main/ablation task; recorded variants
+    (METHODS group "variant", e.g. TR-GAT-SC) are left out so they neither enter the Bonferroni family nor the
+    per-method macros unless named explicitly."""
+    return [(m, s, d) for m, s, d in list_tasks(results_dir)
+            if (m in methods if methods is not None else METHODS[m].group != "variant")
+            and (seeds is None or s in seeds)]
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--results_dir", default="results/main")
@@ -149,8 +159,7 @@ def main():
     args = ap.parse_args()
 
     device = torch.device(args.device if args.device != "auto" else ("cuda" if torch.cuda.is_available() else "cpu"))
-    tasks = [(m, s, d) for m, s, d in list_tasks(args.results_dir)
-             if (args.methods is None or m in args.methods) and (args.seeds is None or s in args.seeds)]
+    tasks = select_tasks(args.results_dir, args.methods, args.seeds)
     if not tasks:
         raise SystemExit(f"no finished tasks under {args.results_dir}")
     # the matched rule first, so its validation false-episode rate is known before the learned methods

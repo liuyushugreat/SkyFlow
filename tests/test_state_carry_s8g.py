@@ -149,6 +149,25 @@ class TestTrainerStateCarry:
 
 
 def test_method_switch():
-    from skyflow.experiments.methods import method_config
+    from skyflow.experiments.methods import method_config, METHODS
     assert method_config("TR-GAT", SkyFlowConfig()).training.state_carry == "window"
     assert method_config("TR-GAT-SC", SkyFlowConfig()).training.state_carry == "scenario"
+    assert METHODS["TR-GAT-SC"].group == "variant"             # recorded variant, not a paper method
+
+
+def test_eval_events_skips_recorded_variants_by_default(tmp_path):
+    """TR-GAT-SC results stay on disk but do not enter the event-level evaluation (Bonferroni family,
+    per-method macros) unless named explicitly."""
+    import importlib.util, pathlib
+    spec = importlib.util.spec_from_file_location(
+        "eval_events", pathlib.Path(__file__).resolve().parents[1] / "scripts" / "eval_events.py")
+    ev = importlib.util.module_from_spec(spec); spec.loader.exec_module(ev)
+    for m in ("TR-GAT", "TR-GAT-SC", "abl_no_gru", "CPA-Rule"):
+        for s in (42, 123):
+            d = tmp_path / m / f"seed{s}"
+            d.mkdir(parents=True)
+            (d / "DONE").touch()
+    default = {(m, s) for m, s, _ in ev.select_tasks(tmp_path)}
+    assert default == {(m, s) for m in ("TR-GAT", "abl_no_gru", "CPA-Rule") for s in (42, 123)}
+    explicit = {(m, s) for m, s, _ in ev.select_tasks(tmp_path, methods=["TR-GAT-SC"], seeds=[42])}
+    assert explicit == {("TR-GAT-SC", 42)}
