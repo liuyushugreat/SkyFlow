@@ -46,6 +46,43 @@ def _sci(x):
     return f"{x:g}"
 
 
+def _kind(method):
+    try:
+        from skyflow.experiments.methods import METHODS
+        return METHODS[method].kind if method in METHODS else None
+    except Exception:          # noqa: BLE001
+        return None
+
+
+def _group_summaries(M, S):
+    """\\learnedFOneMin/Max/SpreadPts, \\learnedFOneBestName, \\learnedAuprcMin/Max, \\ruleFOneBest/BestName,
+    \\gainMinLearnedOverRulePts (weakest learned detector minus best rule, in percentage points),
+    \\gainBestLearnedOverRulePts, \\nLearned, \\nRules - from the main summary table (methods of the main group)."""
+    rows = {m: r for m, r in S.iterrows() if _num_ok(r.get("f1_mean"))}
+    learned = {m: r for m, r in rows.items() if _kind(m) in ("trgat", "learned")}
+    rules = {m: r for m, r in rows.items() if _kind(m) == "rule"}
+    M.add("nLearned", len(learned))
+    M.add("nRules", len(rules))
+    if learned:
+        f = {m: float(r["f1_mean"]) for m, r in learned.items()}
+        lo, hi = min(f, key=f.get), max(f, key=f.get)
+        M.num("learnedFOneMin", f[lo]); M.num("learnedFOneMax", f[hi])
+        M.add("learnedFOneSpreadPts", f"{(f[hi] - f[lo]) * 100:.1f}")
+        M.add("learnedFOneBestName", hi.replace("_", "\\_")); M.add("learnedFOneWorstName", lo.replace("_", "\\_"))
+        if all("auprc_mean" in r and _num_ok(r["auprc_mean"]) for r in learned.values()):
+            a = {m: float(r["auprc_mean"]) for m, r in learned.items()}
+            M.num("learnedAuprcMin", min(a.values())); M.num("learnedAuprcMax", max(a.values()))
+            M.add("learnedAuprcBestName", max(a, key=a.get).replace("_", "\\_"))
+    if rules:
+        f = {m: float(r["f1_mean"]) for m, r in rules.items()}
+        best = max(f, key=f.get)
+        M.num("ruleFOneBest", f[best]); M.add("ruleFOneBestName", best.replace("_", "\\_"))
+        if learned:
+            fl = [float(r["f1_mean"]) for r in learned.values()]
+            M.add("gainMinLearnedOverRulePts", f"{(min(fl) - f[best]) * 100:.1f}")
+            M.add("gainBestLearnedOverRulePts", f"{(max(fl) - f[best]) * 100:.1f}")
+
+
 class Macros:
     def __init__(self):
         self.lines, self.names = [], set()
@@ -114,6 +151,9 @@ def main():
                     p = res.p_value(met, m)
                     if _num_ok(p):
                         M.add(macro_name("p" + {"f1": "FOne", "cdr": "Cdr", "far": "Far"}[met], m), fmt_p(float(p)))
+        # S8g cross-method summaries for the protocol-centred Results text: spread of the learned detectors,
+        # best rule, gap of the weakest / best learned detector over the best rule (percentage points).
+        _group_summaries(M, S)
         # dataset facts from one metrics.json
         tm = res.any_task_metrics(ref) or res.any_task_metrics() or {}
         ds, test, env = tm.get("dataset", {}), tm.get("test", {}), tm.get("env", {})
@@ -183,6 +223,17 @@ def main():
                 M.add(macro_name("ablDFOne", m), f"{float(r['d_f1']):+.3f}")
             if _num_ok(r.get("p_f1_bonf")):
                 M.add(macro_name("ablPFOne", m), fmt_p(float(r["p_f1_bonf"])))
+        # S8g: largest |dF1| over the ablations (percentage points), its variant, and how many are significant
+        ab = res.ablation[(res.ablation["method"] != ref) & res.ablation["d_f1"].apply(_num_ok)]
+        if not ab.empty:
+            i = ab["d_f1"].abs().idxmax()
+            M.add("ablMaxAbsDFOnePts", f"{abs(float(ab.loc[i, 'd_f1'])) * 100:.1f}")
+            M.add("ablMaxAbsDFOneName", str(ab.loc[i, "method"]).replace("_", "\\_"))
+            M.add("ablMaxAbsDFOneSigned", f"{float(ab.loc[i, 'd_f1']):+.3f}")
+            if "p_f1_bonf" in ab.columns:
+                sig = ab[ab["p_f1_bonf"].apply(_num_ok) & (ab["p_f1_bonf"].astype(float) < 0.05)]
+                M.add("ablNSignificant", len(sig))
+                M.add("ablNVariants", len(ab))
 
     # ---- robustness -----------------------------------------------------
     for tag, df, scale in (("Lat", res.rob_latency, 1.0), ("Loss", res.rob_loss, 100.0)):
@@ -220,6 +271,19 @@ def main():
         if "in_train_range" in df.columns and (df["in_train_range"] == 0).any():
             M.add(f"rob{tag}TrainMax", f"{max(df[df['in_train_range'] == 1]['value']) * scale:g}")
             M.add(f"rob{tag}OodLevels", ", ".join(f"{x * scale:g}" for x in sorted(df[df["in_train_range"] == 0]["value"].unique())))
+            # S8g: most / least graceful *learned* detector from the largest in-range level to the extreme one
+            x_in = max(df[df["in_train_range"] == 1]["value"])
+            drops = {}
+            for m in df["method"].unique():
+                if _kind(m) not in ("trgat", "learned"):
+                    continue
+                g = df[df["method"] == m].groupby("value")["cdr"].mean()
+                if x_in in g.index and xs[-1] in g.index and float(g.loc[x_in]) > 0:
+                    drops[m] = (float(g.loc[x_in]) - float(g.loc[xs[-1]])) / float(g.loc[x_in]) * 100
+            if len(drops) >= 2:
+                worst, best = max(drops, key=drops.get), min(drops, key=drops.get)
+                M.add(f"rob{tag}OodDropPctWorstName", worst.replace("_", "\\_")); M.add(f"rob{tag}OodDropPctWorst", f"{drops[worst]:.1f}")
+                M.add(f"rob{tag}OodDropPctBestName", best.replace("_", "\\_")); M.add(f"rob{tag}OodDropPctBest", f"{drops[best]:.1f}")
 
     # ---- scaling --------------------------------------------------------
     if res.scaling_fit is not None:
@@ -316,6 +380,17 @@ def main():
                             M.add(macro_name("evBPCdr", m), fmt_p(float(p)))
             if k_i == 0:
                 M.add("evBudgetKind", str(kind).replace("_", "\\_"))
+                # S8g: spread of the learned detectors under the common budget
+                for key, col in (("Cdr", "event_cdr_mean"), ("Timely", "timely_cdr_mean"), ("LeadMed", "lead_median_s_mean")):
+                    v = {m: float(r[col]) for m, r in rows_b.items()
+                         if _kind(m) in ("trgat", "learned") and _num_ok(r.get(col))}
+                    if len(v) >= 2:
+                        lo, hi = min(v, key=v.get), max(v, key=v.get)
+                        nd = 1 if key == "LeadMed" else 3
+                        M.num(f"evBLearned{key}Min", v[lo], nd); M.num(f"evBLearned{key}Max", v[hi], nd)
+                        M.add(f"evBLearned{key}BestName", hi.replace("_", "\\_"))
+                        if key != "LeadMed":
+                            M.add(f"evBLearned{key}SpreadPts", f"{(v[hi] - v[lo]) * 100:.1f}")
         # SOC facts: for the reference, false-episode rate of the operational layer at (about) the raw event CDR
         if res.events_soc is not None and ref in set(res.events_soc["method"]):
             soc = res.events_soc[(res.events_soc["method"] == ref) & (res.events_soc["split"] == "test")]

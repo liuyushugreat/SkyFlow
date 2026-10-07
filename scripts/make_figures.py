@@ -1,4 +1,4 @@
-﻿"""S16: paper figures, generated only from results/ CSV/JSON (no numbers typed by hand).
+"""S16: paper figures, generated only from results/ CSV/JSON (no numbers typed by hand).
 
     python scripts/make_figures.py --results_dir results --out_dir paper/figs
 
@@ -287,7 +287,7 @@ def fig_results(R, methods, out, layer_method="TR-GAT", rob_legend_loc="lower le
     if not panels:
         print("[skip] combined results figure: no inputs"); return None
     widths = [1.15 if k == "soc" else (1.0 if k == "scal" else 0.85) for k, _ in panels]
-    fig, axes = plt.subplots(1, len(panels), figsize=(TEXT_W, 1.5), gridspec_kw={"width_ratios": widths})
+    fig, axes = plt.subplots(1, len(panels), figsize=(TEXT_W, 1.38), gridspec_kw={"width_ratios": widths})
     axes = np.atleast_1d(axes)
     meta, rob_axes = {}, []
     for ax, (kind, payload), letter in zip(axes, panels, "abcdef"):
