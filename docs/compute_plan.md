@@ -421,6 +421,30 @@ S8e model as TR-GAT and reframe the paper around the leakage-free benchmark + ev
 operational layer; otherwise make "scenario" the default, re-run the ablations on it and treat the "window"
 runs as the ablation `abl_state_window`.
 
+### 12.3 Outcome of B (10-07 10:25) - null result, option closed
+
+| run | best val F1 (epoch) | test F1 | test CDR / FAR |
+|---|---|---|---|
+| TR-GAT seed42 (window) | 0.4262 (46) | 0.4180 | 0.468 / 0.622 |
+| TR-GAT-SC seed42 (scenario) | 0.4228 (46) | 0.4172 | 0.446 / 0.608 |
+| TR-GAT seed123 | 0.4211 (41) | 0.4151 | 0.471 / 0.629 |
+| TR-GAT-SC seed123 | 0.4219 (48) | 0.4195 | 0.461 / 0.615 |
+
+The learning curves coincide epoch by epoch; the differences (-0.1 / +0.4 pt) are inside the seed spread, and
+`abl_no_gru` (0.4161 / 0.4176 on s42 / s456) shows the recurrence carries no signal at all.  Seed 456 of
+TR-GAT-SC was stopped at epoch 5 to free the GPU slot; `training.state_carry` stays "window" by default and
+TR-GAT-SC is kept in `results/main` as the recorded negative (group "variant", not in MAIN_METHODS, so it does
+not enter the paper tables).
+
+Consequence, agreed with the user: the paper is reframed (commit d13e4be) - title "What does learning add to
+rule-based UAV conflict detection under stale surveillance at the edge?", contributions = leakage-free protocol
++ AoI-synchronised shared pair geometry, event-level evaluation with budget / operational layer / near-miss
+analysis, and a controlled comparison in which TR-GAT is the graph-based reference rather than the claimed
+winner.  New macros for that text: `\learnedFOne{Min,Max,SpreadPts,BestName}`, `\ruleFOneBest{,Name}`,
+`\gain{Min,Best}LearnedOverRulePts`, `\evBLearned{Cdr,Timely,LeadMed}{Min,Max,BestName,SpreadPts}`,
+`\ablMaxAbsDFOne{Pts,Name,Signed}`, `\ablNSignificant`, `\ablNVariants`, `\rob{Lat,Loss}OodDropPct{Worst,Best}{,Name}`.
+`scripts/check_paper.py` is the S19 gate (fonts, page rule, undefined macros, `??` markers, smoke flag, `%%CHECK`).
+
 ## Conclusion
 
 **Do not rent: the local 4090 (2 concurrent tasks) finishes the main experiment and 3-seed ablations by about 10-07 evening even if every run goes to 150 epochs.**
