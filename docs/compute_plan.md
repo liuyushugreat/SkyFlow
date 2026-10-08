@@ -480,6 +480,39 @@ fonts embedded, no Type 3), pages PASS (References start on page 5, nothing abov
 numbers / check-marks PASS; one remaining 6.5 pt overfull box is inside a TikZ node of `figs/arch.tex` and invisible
 after `\resizebox`.  `pytest -q`: 187 passed.
 
+### 12.5 Paper removed from the repository and from its history (10-08, owner's requirement)
+
+The paper (LaTeX sources, figures, tables, `numbers.tex`, PDF) is kept local only.  `paper/` was first
+untracked and git-ignored (commit "Remove paper/ from the repository ..."), then the whole history was rewritten
+with `git filter-repo --path paper --invert-paths` and force-pushed (44 -> 38 commits; six commits that touched
+only `paper/` became empty and were pruned).  A full bundle of the pre-rewrite history and a copy of `paper/`
+were saved outside the repository before the rewrite; the complete old->new map is in that backup
+(`commit-map.txt`).  `git_commit` values recorded in `results/**/metrics.json` and in `figures_provenance.json`
+refer to the OLD hashes; the code at each of them is identical to the following NEW commit:
+
+| old (recorded in results/) | new (rewritten history) |
+|---|---|
+| `2353857f62c1` | `f8c907d0f31b` |
+| `3b905a2199af` | `6866d3d44910` |
+| `67d73034e817` | `887a0d77d822` |
+| `742aba243a05` | `204cc2e1b7f9` |
+| `7741ba9d7c50` | `7741ba9d7c50` (unchanged, before the first paper commit) |
+| `a0457678d4a8` | `a0457678d4a8` (unchanged) |
+| `a9880d04f7aa` | `311432a2795a` |
+| `b73a66040c29` | `941bb2cac24f` |
+| `b9abef6f423f` | `5c6cba78de7d` |
+| `c0521db7ca07` | pruned (changed only `paper/`); code state = its parent `1c05425835b4` -> `79cfcdebeb07` |
+| `c69a72d39606` | `68d47a7d7b5f` |
+| `caa2e2dfed15` | `a484e4930637` |
+| `d13e4be688e6` | `b49d2cccc663` |
+| `debcf38528ec` | `ac5a3c917608` |
+| `f060b8e47977` | `fa97082c885e` |
+| `fe430deafba0` | `da268ab19bba` |
+
+The result files themselves were not edited (rule 1: generated artefacts are never hand-modified).  Note that
+GitHub may keep the old, now unreachable commits accessible by hash until its garbage collection runs; if that
+matters, ask GitHub support to purge them.
+
 ## Conclusion
 
 **Do not rent: the local 4090 (2 concurrent tasks) finishes the main experiment and 3-seed ablations by about 10-07 evening even if every run goes to 150 epochs.**
