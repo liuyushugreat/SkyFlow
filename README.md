@@ -12,9 +12,13 @@
 > gate) is the graph-based reference model of that comparison.
 
 **Every number in the paper is generated from files under `results/` by the scripts in `scripts/`;
-nothing is typed by hand.** `paper/numbers.tex`, `paper/tables/*.tex` and `paper/figs/*.pdf` are
-build artefacts of `scripts/make_macros.py`, `scripts/make_tables.py` and `scripts/make_figures.py`,
+nothing is typed by hand.** `scripts/make_macros.py`, `scripts/make_tables.py` and
+`scripts/make_figures.py` write the LaTeX macros, tables and figures into a local `paper/` directory,
 and each generated file records the `results/` directory, git commit and hardware it came from.
+
+**The paper itself (LaTeX sources, figures, tables, `numbers.tex`, PDF) is kept local only and is not
+part of this repository** (`paper/` is git-ignored). The repository contains the code, configurations and
+result files from which every number can be regenerated.
 
 ---
 
@@ -32,11 +36,11 @@ and each generated file records the `results/` directory, git commit and hardwar
 | Event-level metrics (conflict events, lead time, false alert episodes per UAV-hour), SOC curves, EMA/hysteresis operational layer, budget-matched operating points | `skyflow/experiments/events.py`, `scripts/eval_events.py` |
 | Near-miss analysis of false alerts by re-simulating the truth | `skyflow/experiments/nearmiss.py`, `scripts/analyze_nearmiss.py` |
 | Robustness beyond the training link conditions, latency scaling with log-log exponents, CPU-only latency | `scripts/run_robustness.py`, `scripts/run_scaling.py`, `scripts/eval_only.py` |
-| Paper sources (IEEEtran) | `paper/` |
+| Paper artefact generators (macros, tables, figures, submission gate); the paper sources themselves are local only | `scripts/make_macros.py`, `scripts/make_tables.py`, `scripts/make_figures.py`, `scripts/check_paper.py` |
 
 Headline numbers are **not** repeated here: read them from `results/main_summary.csv`,
 `results/events_summary.csv`, `results/events_budget_summary.csv`, `results/robustness_*.csv`,
-`results/scaling_fit.json` and `results/nearmiss.csv`, or from the generated `paper/tables/*.tex`.
+`results/scaling_fit.json` and `results/nearmiss.csv`.
 
 ---
 
@@ -74,8 +78,9 @@ python scripts/run_main.py --config configs/default.yaml --results_dir results/m
 bash run.sh                                   # Linux/macOS: all S15 stages below
 powershell -ExecutionPolicy Bypass -File scripts/run_s15.ps1    # Windows equivalent
 
-# 3. paper (+ submission gate: fonts embedded / no Type 3, page rule, no undefined macro, no smoke numbers)
-cd paper && xelatex skyflow_iscas2027 && bibtex skyflow_iscas2027 && xelatex skyflow_iscas2027 && xelatex skyflow_iscas2027 && cd ..
+# 3. paper artefacts are written to a local paper/ directory (git-ignored; the LaTeX sources are not in
+#    this repository). With the sources present, the submission gate (fonts embedded / no Type 3, page
+#    rule, no undefined macro, no smoke numbers) is:
 python scripts/check_paper.py --paper_dir paper
 ```
 
@@ -124,8 +129,8 @@ SkyFlow/
 ├── configs/                    # default.yaml (paper), smoke.yaml (tests)
 ├── tests/                      # pytest suite
 ├── results/                    # metrics.json per run + aggregated CSV/JSON (inputs of the paper)
-├── paper/                      # IEEEtran sources; numbers.tex / tables / figs are generated
 └── docs/                       # compute plan and run log
+# paper/ (LaTeX sources, generated numbers.tex / tables / figs, PDF) exists only locally and is git-ignored.
 ```
 
 ## License

@@ -17,14 +17,7 @@ results/_*/
 results/archive/
 logs/
 
-# LaTeX build files (paper/)
-paper/*.aux
-paper/*.log
-paper/*.blg
-paper/*.bbl
-paper/*.out
-paper/*.synctex.gz
-paper/figs/*.aux
-paper/figs/*.log
-paper/skyflow_iscas2027.pdf
+# Paper sources (LaTeX, figures, tables, numbers.tex, PDF) are kept LOCAL ONLY and are never
+# uploaded to GitHub (owner's requirement, 2026-10-08). The scripts still write into paper/.
+paper/
 results/main/**/*.log
