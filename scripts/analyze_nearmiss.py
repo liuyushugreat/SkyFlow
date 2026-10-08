@@ -14,6 +14,7 @@ budget-matched operating point of each checkpoint.
 import argparse
 import csv
 import json
+import math
 import sys
 import time
 from pathlib import Path
@@ -70,6 +71,9 @@ def main():
         tab = score_table(lm, data, sps)
         ops = [("val_f1", tab.alert, {"threshold": tab.threshold, "alpha": 1.0, "hysteresis": 0.0})]
         for r in budget_ops.get((lm.method, lm.seed), []):
+            # rules are single operating points: fixed budgets they cannot meet are recorded as infeasible (NaN)
+            if int(r.get("feasible", 1)) == 0 or not all(math.isfinite(float(r[k])) for k in ("threshold", "alpha", "hysteresis")):
+                continue
             a = filtered_alerts(tab, float(r["threshold"]), float(r["alpha"]), float(r["hysteresis"]))
             ops.append((f"budget_{float(r['budget']):g}", a, {k: r[k] for k in ("threshold", "alpha", "hysteresis")}))
         for op_name, alert, tags in ops:

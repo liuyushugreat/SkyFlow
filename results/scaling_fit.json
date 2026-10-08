@@ -1,0 +1,89 @@
+{
+  "mode": "fixed_area",
+  "sizes_requested": [
+    100,
+    250,
+    500,
+    1000,
+    2000
+  ],
+  "sizes_ok": [
+    100,
+    250,
+    500,
+    1000,
+    2000
+  ],
+  "failed": [],
+  "epochs": 1000,
+  "distinct_snapshots": 100,
+  "checkpoint": "results\\main\\TR-GAT\\seed42",
+  "fits": {
+    "total_p95_ms": {
+      "alpha": 1.3202937943545838,
+      "c": 0.014173340922078554,
+      "r2": 0.9398629532114218,
+      "alpha_se": 0.1928185166429901,
+      "n_points": 5
+    },
+    "graph_build_p95_ms": {
+      "alpha": 1.846448519364206,
+      "c": 0.0003123962166840718,
+      "r2": 0.9875958838633477,
+      "alpha_se": 0.11947302296592423,
+      "n_points": 5
+    },
+    "gnn_forward_p95_ms": {
+      "alpha": 0.15487621774679527,
+      "c": 1.9996874804839346,
+      "r2": 0.5080098416690929,
+      "alpha_se": 0.08799667277852921,
+      "n_points": 5
+    },
+    "pair_scoring_p95_ms": {
+      "alpha": 0.3475256118852932,
+      "c": 0.5470016466794324,
+      "r2": 0.7451281250099986,
+      "alpha_se": 0.11734691269388306,
+      "n_points": 5
+    },
+    "total_mean_ms": {
+      "alpha": 1.335708599118646,
+      "c": 0.011360577419574438,
+      "r2": 0.9373114916488812,
+      "alpha_se": 0.19943578722872984,
+      "n_points": 5
+    },
+    "mean_edges": {
+      "alpha": 1.1624422645232153,
+      "c": 3.484173414003093,
+      "r2": 0.9952900427365483,
+      "alpha_se": 0.046168356847932135,
+      "n_points": 5
+    },
+    "mean_candidate_pairs": {
+      "alpha": 1.4984532381385192,
+      "c": 5.4504493036042145,
+      "r2": 0.9812556191232868,
+      "alpha_se": 0.1195713242330757,
+      "n_points": 5
+    }
+  },
+  "env": {
+    "hostname": "DESKTOP-G0C01AN",
+    "os": "Windows 11",
+    "python": "3.14.3",
+    "torch": "2.14.0+cu130",
+    "cuda": "13.0",
+    "cudnn": 92400,
+    "device": "cuda",
+    "cpu_model": "Intel(R) Core(TM) i9-14900K",
+    "gpu_model": "NVIDIA GeForce RTX 4090",
+    "gpu_memory_gb": 25.8,
+    "driver": "591.86",
+    "tf32_matmul": true,
+    "tf32_cudnn": true,
+    "git_commit": "caa2e2dfed15ce33538df72816ad6de6d97e5397"
+  },
+  "created": "2026-10-08 01:11:41"
+}

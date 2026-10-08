@@ -272,22 +272,30 @@ def _draw_soc(ax, soc_csv, events_csv, budget_csv, methods, layer_method="TR-GAT
 TEXT_W = 7.16         # IEEE two-column text width (in)
 
 
-def fig_results(R, methods, out, layer_method="TR-GAT", rob_legend_loc="lower left", scal_legend_loc="lower right"):
-    """One full-width figure* with up to four panels: (a) SOC curve, (b) CDR vs
+RESULTS_PANELS = ("soc", "lat", "loss", "scal")
+
+
+def fig_results(R, methods, out, layer_method="TR-GAT", rob_legend_loc="lower left", scal_legend_loc="lower right",
+                include=RESULTS_PANELS, width=TEXT_W, height=1.28):
+    """Combined results figure with up to four panels: (a) SOC curve, (b) CDR vs
     latency, (c) CDR vs packet loss, (d) P95 latency scaling.  Same data and
-    drawing code as the single-column figures; panels whose CSV is missing are
-    skipped so the layout degrades gracefully."""
+    drawing code as the single-column figures; panels whose CSV is missing or
+    that are not in ``include`` are skipped (page budget: the paper uses the
+    single-column "soc lat" subset; every omitted panel is still produced as
+    its own figure file and summarised by macros in the text)."""
     panels = []
-    if (R / "events_soc.csv").exists():
+    if "soc" in include and (R / "events_soc.csv").exists():
         panels.append(("soc", None))
-    for d, xlabel in _robustness_panels(R / "robustness_latency.csv", R / "robustness_loss.csv"):
-        panels.append(("rob", (d, xlabel)))
-    if (R / "scaling.csv").exists():
+    for (d, xlabel), tag in zip(_robustness_panels(R / "robustness_latency.csv", R / "robustness_loss.csv"),
+                                [t for t, p in (("lat", R / "robustness_latency.csv"), ("loss", R / "robustness_loss.csv")) if p.exists()]):
+        if tag in include:
+            panels.append(("rob", (d, xlabel)))
+    if "scal" in include and (R / "scaling.csv").exists():
         panels.append(("scal", None))
     if not panels:
         print("[skip] combined results figure: no inputs"); return None
     widths = [1.15 if k == "soc" else (1.0 if k == "scal" else 0.85) for k, _ in panels]
-    fig, axes = plt.subplots(1, len(panels), figsize=(TEXT_W, 1.38), gridspec_kw={"width_ratios": widths})
+    fig, axes = plt.subplots(1, len(panels), figsize=(width, height), gridspec_kw={"width_ratios": widths})
     axes = np.atleast_1d(axes)
     meta, rob_axes = {}, []
     for ax, (kind, payload), letter in zip(axes, panels, "abcdef"):
@@ -322,6 +330,10 @@ def main():
     ap.add_argument("--attention_layer", type=int, default=None)
     ap.add_argument("--rob_legend_loc", default="lower left", help="legend position in the loss panel of fig_results")
     ap.add_argument("--scal_legend_loc", default="lower right", help="legend position in the scaling panel of fig_results")
+    ap.add_argument("--results_panels", nargs="+", default=["soc", "lat"], choices=RESULTS_PANELS,
+                    help="panels of fig_results (paper default: SOC + latency, single column; 'soc lat loss scal' = full-width)")
+    ap.add_argument("--results_width", choices=["col", "text"], default="col", help="fig_results width: one column or full text width")
+    ap.add_argument("--results_height", type=float, default=1.45, help="fig_results height (in)")
     args = ap.parse_args()
     R, O = Path(args.results_dir), Path(args.out_dir)
     info = {
@@ -332,7 +344,8 @@ def main():
         "lead": fig_lead(R / "events_lead.npz", R / "events.csv", args.methods, O / "fig_lead.pdf"),
         "soc": fig_soc(R / "events_soc.csv", R / "events.csv", R / "events_budget.csv", args.methods, O / "fig_soc.pdf"),
         "results": fig_results(R, args.methods, O / "fig_results.pdf", rob_legend_loc=args.rob_legend_loc,
-                               scal_legend_loc=args.scal_legend_loc),
+                               scal_legend_loc=args.scal_legend_loc, include=tuple(args.results_panels),
+                               width=COL_W if args.results_width == "col" else TEXT_W, height=args.results_height),
     }
     O.mkdir(parents=True, exist_ok=True)
     json.dump({"results_dir": str(R), **info}, open(O / "figures_provenance.json", "w"), indent=2, default=str)

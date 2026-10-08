@@ -1,0 +1,23 @@
+{
+  "checkpoint": "results\\main\\TR-GAT\\seed42",
+  "split": "test",
+  "snapshots": 600,
+  "seconds": 5.901299699995434,
+  "env": {
+    "hostname": "DESKTOP-G0C01AN",
+    "os": "Windows 11",
+    "python": "3.14.3",
+    "torch": "2.14.0+cu130",
+    "cuda": "13.0",
+    "cudnn": 92400,
+    "device": "cuda",
+    "cpu_model": "Intel(R) Core(TM) i9-14900K",
+    "gpu_model": "NVIDIA GeForce RTX 4090",
+    "gpu_memory_gb": 25.8,
+    "driver": "591.86",
+    "tf32_matmul": true,
+    "tf32_cudnn": true,
+    "git_commit": "caa2e2dfed15ce33538df72816ad6de6d97e5397"
+  },
+  "created": "2026-10-08 01:11:58"
+}

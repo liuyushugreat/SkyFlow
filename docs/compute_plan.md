@@ -445,6 +445,41 @@ winner.  New macros for that text: `\learnedFOne{Min,Max,SpreadPts,BestName}`, `
 `\ablMaxAbsDFOne{Pts,Name,Signed}`, `\ablNSignificant`, `\ablNVariants`, `\rob{Lat,Loss}OodDropPct{Worst,Best}{,Name}`.
 `scripts/check_paper.py` is the S19 gate (fonts, page rule, undefined macros, `??` markers, smoke flag, `%%CHECK`).
 
+### 12.4 Run log of the final round and the page cut (10-07 afternoon to 10-08 morning)
+
+Chain drivers: `chain_s8g` (superseded) -> `chain_s8h` -> `chain_s8i` (`logs/chain_s8i.log`).  `abl_no_plan/seed123`
+had died silently at launch (13:46, one log line, no DONE marker); `chain_s8i` waited until `run_main` held a single
+task, launched it manually at 21:52 (`run_task.py`, stdout/stderr redirected into the task dir) and finished at 23:17
+(F1 0.3620); the `run_main --resume` safety net found nothing left to do.  DONE markers: 47 (9 main x 3 seeds, 8
+ablations x 3 seeds minus the stopped TR-GAT-SC seed456 counted as variant), training code identical across the
+commits recorded in `metrics.json` (only paper/script commits happened during the round).
+
+S15 (`run_s15.ps1`): 23:17 -> 01:46, 148.6 min on the RTX 4090 / i9-14900K.  The `nearmiss` stage failed once with
+`alpha must be in (0, 1]`: under a fixed budget the rules have no feasible operating point (NaN alpha / hysteresis) and
+`analyze_nearmiss.py` now skips infeasible rows (`feasible==0` or non-finite threshold/alpha/hysteresis); the stage was
+re-run alone (exit 0) and `numbers.tex` regenerated (1772 macros, `numbersAreSmoke=0`).
+
+Headline numbers (all from `results/`, 3 seeds): F1 TR-GAT 0.416+-0.002 (AUPRC 0.402, P95 31.3 ms), TR-GAT-NT 0.417,
+GAT-S 0.415, STGCN 0.420, Tfm-P 0.423, LSTM-P 0.426 (the only significant difference to TR-GAT, p=0.044), CPA-Rule
+0.363, Plan-CPA 0.382, VO 0.165 -> learned spread 1.1 pt, gain over the best rule 3.2-4.4 pt.  Ablation: only
+`abl_no_plan` (-0.057, p=0.011) and `abl_telemetry_only` (-0.047, p=0.010) are significant; input-side mean |dF1| 2.9 pt
+vs encoder-side 0.2 pt.  Events: 3,530 events / 83.3 UAV-h; raw TR-GAT 0.855 @ 209.4 FA/UAV-h (Plan-CPA 0.855 @ 193.6,
+CPA-Rule 0.739 @ 216.4); EMA/hysteresis layer (alpha 0.5, h 0.15) -> 102.1 FA/UAV-h (-51 %); matched budget 174.0:
+learned 0.947-0.964, lead 27.3-28.6 s, no significant pairwise difference (min Bonferroni p 0.106).  Robustness: loss
+OOD drop <= 1.0 %; latency 2 -> 5 s: STGCN -44.4 %, GAT-S -50.1 %, TR-GAT -65.1 % (0.351 -> 0.123), TR-GAT-NT -69.7 %,
+CPA-Rule -15.2 %, Plan-CPA -15.0 %.  CPU TR-GAT 73.8 ms (within 200 ms); slopes total 1.32 / build 1.85 / fwd 0.15 /
+score 0.35 / cands 1.50; largest N under budget 1000.  Near-miss (TR-GAT s42): false-alert median rho 2.33 (42 % < 2)
+vs 84.58 (0.2 %) for 200k negatives, 0 label mismatches.
+
+Page cut (6 -> 4 pages + references): float spacing lengths tightened; Fig. 2 reduced to a single-column two-panel
+figure (SOC + latency sweep; `make_figures.py --results_panels soc lat --results_width col --results_height 1.25`,
+the loss sweep and scaling panels stay in `fig_robustness.pdf` / `fig_scaling.pdf` for the repository only);
+contributions as run-in (i)-(iii); Results written entirely from macros with data-check comments (`% ...`) instead of
+`%%CHECK`; Tables I/II at `tabcolsep` 1.7 pt to remove 10 pt overfull boxes.  Final `check_paper.py`: fonts PASS (16
+fonts embedded, no Type 3), pages PASS (References start on page 5, nothing above the heading), macros / markers /
+numbers / check-marks PASS; one remaining 6.5 pt overfull box is inside a TikZ node of `figs/arch.tex` and invisible
+after `\resizebox`.  `pytest -q`: 187 passed.
+
 ## Conclusion
 
 **Do not rent: the local 4090 (2 concurrent tasks) finishes the main experiment and 3-seed ablations by about 10-07 evening even if every run goes to 150 epochs.**

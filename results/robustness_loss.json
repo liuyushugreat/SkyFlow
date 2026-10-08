@@ -1,0 +1,55 @@
+{
+  "sweep": "loss",
+  "values": [
+    0.0,
+    0.1,
+    0.2,
+    0.3,
+    0.4,
+    0.5
+  ],
+  "latency_jitter": 0.4,
+  "methods": [
+    "TR-GAT",
+    "TR-GAT-NT",
+    "GAT-S",
+    "STGCN",
+    "CPA-Rule",
+    "Plan-CPA"
+  ],
+  "results_dir": "results/main",
+  "checkpoints": [
+    "results\\main\\CPA-Rule\\seed42",
+    "results\\main\\GAT-S\\seed123",
+    "results\\main\\GAT-S\\seed42",
+    "results\\main\\GAT-S\\seed456",
+    "results\\main\\Plan-CPA\\seed42",
+    "results\\main\\STGCN\\seed123",
+    "results\\main\\STGCN\\seed42",
+    "results\\main\\STGCN\\seed456",
+    "results\\main\\TR-GAT\\seed123",
+    "results\\main\\TR-GAT\\seed42",
+    "results\\main\\TR-GAT\\seed456",
+    "results\\main\\TR-GAT-NT\\seed123",
+    "results\\main\\TR-GAT-NT\\seed42",
+    "results\\main\\TR-GAT-NT\\seed456"
+  ],
+  "env": {
+    "hostname": "DESKTOP-G0C01AN",
+    "os": "Windows 11",
+    "python": "3.14.3",
+    "torch": "2.14.0+cu130",
+    "cuda": "13.0",
+    "cudnn": 92400,
+    "device": "cuda",
+    "cpu_model": "Intel(R) Core(TM) i9-14900K",
+    "gpu_model": "NVIDIA GeForce RTX 4090",
+    "gpu_memory_gb": 25.8,
+    "driver": "591.86",
+    "tf32_matmul": true,
+    "tf32_cudnn": true,
+    "git_commit": "caa2e2dfed15ce33538df72816ad6de6d97e5397"
+  },
+  "seconds": 2902.7715812000097,
+  "created": "2026-10-08 00:50:56"
+}
